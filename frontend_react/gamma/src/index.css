@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-primary: #050b16;
+  --color-bg-secondary: #0c1424;
+  --color-bg-card: #111c2f;
+  --color-border: #1f2d45;
+
+  --color-green: #39d353;
+  --color-red: #ff4d4f;
+  --color-yellow: #ffb020;
+  --color-blue: #3b82f6;
+  --color-purple: #8b5cf6;
+
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #d0d9e5;
+
+  --radius-card: 14px;
+
+  --default-transition-duration: 250ms;
+}
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background-color: var(--color-bg-primary);
+  }
+
+  body {
+    margin: 0;
+    min-width: 320px;
+    background:
+      radial-gradient(circle at top, rgba(59, 130, 246, 0.08), transparent 30%),
+      var(--color-bg-primary);
+    color: var(--color-text-primary);
+    font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+  }
+
+  button {
+    font: inherit;
+  }
+
+  #root {
+    min-height: 100vh;
+  }
+}

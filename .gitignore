@@ -1,0 +1,22 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Python cache / virtual env
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# Groww / instrument master files
+*groww*master*
+*grow*master*
+*instrument*master*
+
+# All virtual environments
+venv*/
+**/venv*/
+.venv*/
+**/.venv*/
