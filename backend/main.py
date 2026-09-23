@@ -16,6 +16,7 @@ from .app.config import (
 )
 from .app.db import init_db
 from .app.services.scheduler_service import RefreshScheduler
+from .app.services.open_trade_monitor import OpenTradeMonitor
 from .app.utils.logger import configure_logging
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ scheduler = RefreshScheduler(
     refresh_service=refresh_service,
     interval_seconds=settings.refresh_interval_seconds,
 )
+open_trade_monitor = OpenTradeMonitor(settings, interval_seconds=10.0)
 
 
 @asynccontextmanager
@@ -48,6 +50,7 @@ async def lifespan(_: FastAPI):
         scheduler._refresh_service is refresh_service,  # noqa: SLF001
     )
     await scheduler.start()
+    await open_trade_monitor.start()
     if settings.run_refresh_on_startup:
         asyncio.create_task(
             asyncio.to_thread(refresh_service.run_refresh, trigger="startup", force=True),
@@ -56,6 +59,7 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        await open_trade_monitor.stop()
         await scheduler.stop()
         print(" ")
 
@@ -79,7 +83,6 @@ app.include_router(router)
 
 # Backward-compatible legacy prefix.
 app.include_router(router, prefix="/api", include_in_schema=False)
-
 
 
 

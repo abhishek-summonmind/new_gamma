@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 import logging
-from dataclasses import dataclass, field
+import time as time_module
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -31,6 +33,16 @@ S9_FILTER_WEIGHTS = {
     "oi_change_pct": 0,
 }
 S9_TOTAL_SCORE = sum(S9_FILTER_WEIGHTS.values())
+S9_TARGET_INDEX_FILTER_WEIGHTS = {
+    "vwap": 15,
+    "order_book": 15,
+    "pcr_shift": 15,
+    "spread": 10,
+    "delta": 15,
+    "theta": 10,
+    "vega_vix": 10,
+    "gamma": 10,
+}
 # Conditional macro confirmation: India VIX, Brent, USD/INR, and FII/DII each
 # contribute at most one point after the technical setup is fully confirmed.
 S9_MACRO_CONFLUENCE_BONUS = 4
@@ -351,7 +363,17 @@ class ScreenerEngine:
             "underlying_symbol": index_key,
         }
         filters_required = (
-            ["3m EMA9 Breakout", "Stochastic RSI", "Supertrend", "Delta", "PCR", "Premium > VWAP", "Order Book"]
+            [
+                "15m Completed Spot Close vs EMA20",
+                "Premium > VWAP and <= 2.5% extension",
+                "Order Book 55%-58% sustained for 5 seconds",
+                "3m Volume PCR Shift",
+                "Bid-Ask Spread < INR 0.05",
+                "Delta",
+                "Normalized Theta",
+                "Vega + India VIX",
+                "Gamma",
+            ]
             if is_nifty_sensex_setup
             else [
                 "Sweep Trigger",
@@ -363,21 +385,68 @@ class ScreenerEngine:
         )
         if uses_stock_bank_finnifty_indicators:
             filters_required.extend(["Stochastic RSI", "Supertrend"])
-        if apply_oi_change_filter:
+        if apply_oi_change_filter and not is_nifty_sensex_setup:
             filters_required.append(
                 "3-Min OI Change: > +5% or < -1%"
                 if is_nifty_sensex_setup
                 else "5-Min OI Change: > +5% or < -3%"
             )
-        if apply_volume_breakout_filter:
+        if apply_volume_breakout_filter and not is_nifty_sensex_setup:
             filters_required.append(
                 "3m Volume Breakout: Green/Red + Live Volume >= Avg Volume(20) * 1.5"
                 if is_nifty_sensex_setup
                 else "3m Premium Chart: Close > Open + Close > VWAP + after 170s Live Volume > Avg Volume * 2"
             )
+        if is_nifty_sensex_setup:
+            effective_direction, effective_signal = self._resolve_s9_target_index_macro_direction(
+                states_by_timeframe=states_by_timeframe,
+                underlying_symbol=index_key,
+            )
+            direction_source = "completed_15m_spot_ema20"
+            resolved_side = {
+                "bullish": ("bullish", "CE"),
+                "bearish": ("bearish", "PE"),
+            }.get(effective_direction)
+            direction_option_sides = (resolved_side,) if resolved_side is not None else ()
+        else:
+            effective_direction, effective_signal, direction_source = self._resolve_s9_effective_direction(
+                auto_direction="neutral",
+                auto_signal="neutral",
+                override=override,
+                s1_signals=s1_signals,
+                underlying_symbol=index_key,
+                states_by_timeframe=states_by_timeframe,
+            )
+            resolved_side = {
+                "bullish": ("bullish", "CE"),
+                "bearish": ("bearish", "PE"),
+            }.get(effective_direction)
+            direction_option_sides = (resolved_side,) if resolved_side is not None else ()
+        direction_key = normalize_market_symbol(index_key).replace(" ", "_").lower()
+        direction_meta = {
+            "direction_source": direction_source,
+            "effective_direction": effective_direction,
+            "effective_signal": effective_signal,
+            "underlying_direction": effective_direction,
+            "underlying_signal": effective_signal,
+            f"{direction_key}_direction": effective_direction,
+            f"{direction_key}_signal": effective_signal,
+        }
+        s9_meta.update(direction_meta)
+        selected_option_side = direction_option_sides[0][1] if len(direction_option_sides) == 1 else None
         strategy_rules = {
-            "timeframe_alignment": "S1 removed. S9 scans CE and PE directly.",
-            "option_side": f"Scan {index_key} CE and PE",
+            "timeframe_alignment": (
+                "Latest completed 15m spot close above EMA20 scans CE only; below EMA20 scans PE only."
+                if is_nifty_sensex_setup
+                else "S1 removed. S9 uses existing resolved direction for option side."
+            ),
+            "option_side": (
+                f"Scan {index_key} {selected_option_side} only" if selected_option_side is not None else f"Do not scan {index_key} options until completed 15m EMA20 direction resolves"
+                if is_nifty_sensex_setup
+                else f"Scan {index_key} {selected_option_side} only"
+                if selected_option_side is not None
+                else f"Do not scan {index_key} options until direction resolves"
+            ),
             "filters_required": filters_required,
             "setup_type": "stock_3m_ema9_breakout" if is_stock_setup else "index_options",
         }
@@ -414,16 +483,15 @@ class ScreenerEngine:
             "underlying_rsi_length": 14,
             "underlying_rsi_candle_time": rsi_state.latest.candle_time.isoformat() if rsi_state is not None else None,
         }
-
-        validation = self.validate_option_chain(option_chain)
-        if not validation.is_valid:
+        if not direction_option_sides:
+            rejection_reason = f"{direction_key.upper()}_NEUTRAL"
             return [
                 ScreenerSignal(
                     screener="S9",
                     symbol=index_key,
                     signal="neutral",
                     confidence=0.0,
-                    reason="OPTION_CHAIN_UNAVAILABLE",
+                    reason=rejection_reason,
                     payload={
                         **s9_meta,
                         **rsi_meta,
@@ -445,6 +513,45 @@ class ScreenerEngine:
                         "confirmed": False,
                         "passed_count": 0,
                         "total_filters": len(filters_required),
+                        "rejection_reason": rejection_reason,
+                        "strategy_rules": strategy_rules,
+                        "signal_only": True,
+                        "execution_allowed": False,
+                        "filters": {},
+                    },
+                )
+            ]
+
+        validation = self.validate_option_chain(option_chain)
+        if not validation.is_valid:
+            return [
+                ScreenerSignal(
+                    screener="S9",
+                    symbol=index_key,
+                    signal="neutral",
+                    confidence=0.0,
+                    reason="OPTION_CHAIN_UNAVAILABLE",
+                    payload={
+                        **s9_meta,
+                        **rsi_meta,
+                        "underlying_symbol": index_key,
+                        "option_type": selected_option_side,
+                        "strike": None,
+                        "option_symbol": None,
+                        "final_strike": None,
+                        "final_option_symbol": None,
+                        "final_option_type": selected_option_side,
+                        "evaluated_strike": None,
+                        "evaluated_option_type": selected_option_side,
+                        "evaluated_option_symbol": None,
+                        "tested_strike": None,
+                        "tested_option_type": selected_option_side,
+                        "tested_option_symbol": None,
+                        "signal": None,
+                        "signal_time": signal_time,
+                        "confirmed": False,
+                        "passed_count": 0,
+                        "total_filters": len(filters_required),
                         "rejection_reason": "OPTION_CHAIN_UNAVAILABLE",
                         "option_chain_validation_reason": validation.reason,
                         "strategy_rules": strategy_rules,
@@ -455,8 +562,10 @@ class ScreenerEngine:
                 )
             ]
 
+        if is_nifty_sensex_setup:
+            self._record_s9_volume_pcr(option_chain, now_market=now_market)
         strike_selection_mode = self._s9_strike_selection_mode(option_chain, now_market, index_key)
-        for direction, option_type in (("bullish", "CE"), ("bearish", "PE")):
+        for direction, option_type in direction_option_sides:
             if index_state is None:
                 required_tf = underlying_timeframe
                 sweep_check = {"passed": False, "reason": f"{index_key} {required_tf} state unavailable", "data": {}}
@@ -469,11 +578,15 @@ class ScreenerEngine:
             pcr_check = self._check_pcr_buy(option_chain) if direction == "bullish" else self._check_pcr_sell(option_chain)
             raw_market_filters = (
                 {
-                    "ema9": self._check_index_ema9_buy(index_state)
-                    if direction == "bullish"
-                    else self._check_index_ema9_sell(index_state),
-                    "stoch_rsi": self._check_index_stoch_rsi(index_state, direction),
-                    "pcr": self._check_target_pcr(option_chain, direction),
+                    "macro_trend": self._check_target_macro_trend(
+                        (states_by_timeframe.get("s9_15m_completed") or {}).get(index_key),
+                        direction,
+                    ),
+                    "pcr_shift": self._check_target_volume_pcr_shift(
+                        option_chain,
+                        direction,
+                        now_market=now_market,
+                    ),
                 }
                 if is_nifty_sensex_setup
                 else {"sweep": sweep_check, "pcr": pcr_check}
@@ -491,8 +604,7 @@ class ScreenerEngine:
                 for name, check in raw_market_filters.items()
             }
             for contract in self._eligible_s9_contracts(option_chain, option_type, strike_selection_mode):
-                contract_evaluations.append(
-                    self._evaluate_s9_contract(
+                evaluation = self._evaluate_s9_contract(
                         contract=contract,
                         option_chain=option_chain,
                         underlying=index_key,
@@ -501,20 +613,50 @@ class ScreenerEngine:
                         market_filters=market_filters,
                         strike_selection_mode=strike_selection_mode,
                         previous_option_map=previous_option_map,
-                        apply_oi_change_filter=apply_oi_change_filter,
+                        apply_oi_change_filter=apply_oi_change_filter and not is_nifty_sensex_setup,
                         underlying_state=index_state,
                         volume_breakout_state=volume_breakout_state,
                         stock_setup=is_stock_setup,
-                        volume_breakout_setup=apply_volume_breakout_filter,
+                        volume_breakout_setup=apply_volume_breakout_filter and not is_nifty_sensex_setup,
                         target_index_setup=is_nifty_sensex_setup,
                         option_state=option_states.get((float(contract.strike), option_type)),
                         option_rsi_state=option_rsi_states.get((float(contract.strike), option_type)),
-                        apply_supertrend_filter=is_nifty_sensex_setup or uses_stock_bank_finnifty_indicators,
+                        apply_supertrend_filter=(not is_nifty_sensex_setup) and uses_stock_bank_finnifty_indicators,
                         supertrend_factor=1.0 if is_nifty_sensex_setup else 1.5,
                         evaluation_time=now_market,
                         macro_context=macro_context,
                     )
-                )
+                if is_nifty_sensex_setup and self._target_microstructure_refresh_required(evaluation):
+                    live_contract = self._sample_target_microstructure(
+                        underlying=index_key,
+                        contract=contract,
+                        direction=direction,
+                        option_symbol=evaluation["option_symbol"],
+                    )
+                    if live_contract is not None:
+                        evaluation = self._evaluate_s9_contract(
+                            contract=live_contract,
+                            option_chain=option_chain,
+                            underlying=index_key,
+                            option_type=option_type,
+                            direction=direction,
+                            market_filters=market_filters,
+                            strike_selection_mode=strike_selection_mode,
+                            previous_option_map=previous_option_map,
+                            apply_oi_change_filter=False,
+                            underlying_state=index_state,
+                            volume_breakout_state=volume_breakout_state,
+                            stock_setup=is_stock_setup,
+                            volume_breakout_setup=False,
+                            target_index_setup=True,
+                            option_state=option_states.get((float(contract.strike), option_type)),
+                            option_rsi_state=option_rsi_states.get((float(contract.strike), option_type)),
+                            apply_supertrend_filter=False,
+                            supertrend_factor=1.0,
+                            evaluation_time=None,
+                            macro_context=macro_context,
+                        )
+                contract_evaluations.append(evaluation)
         delta_missing_count = sum(
             1
             for item in contract_evaluations
@@ -524,7 +666,7 @@ class ScreenerEngine:
             logger.warning(
                 "S9 delta unavailable summary underlying=%s option_type=%s missing=%s scanned=%s",
                 index_key,
-                option_type,
+                "CE+PE" if is_nifty_sensex_setup else option_type,
                 delta_missing_count,
                 len(contract_evaluations),
             )
@@ -650,6 +792,10 @@ class ScreenerEngine:
             "delta": "DELTA_FAILED",
             "theta": "THETA_FAILED",
             "pcr": "PCR_FAILED",
+            "pcr_shift": "PCR_SHIFT_FAILED",
+            "spread": "SPREAD_FAILED",
+            "vega_vix": "VEGA_VIX_FAILED",
+            "gamma": "GAMMA_FAILED",
             "vwap": "VWAP_FAILED",
             "volume_breakout": "VOLUME_BREAKOUT_FAILED",
             "order_book": "ORDER_BOOK_FAILED",
@@ -707,7 +853,7 @@ class ScreenerEngine:
                         "market_filters": market_filters,
                         "contract_filters": {
                             key: filters[key]
-                            for key in ("delta", "theta", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
+                            for key in ("delta", "theta", "vega_vix", "gamma", "spread", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
                             if key in filters
                         },
                         "signal": None,
@@ -733,9 +879,8 @@ class ScreenerEngine:
                 )
             ]
 
-        # Reaching this branch means a CE or PE contract passed every active
-        # technical filter. Emit the executable action expected by AutoEntryService;
-        # the direction comes from those filters, never from macro context.
+        # Reaching this branch means the direction-matched CE or PE contract
+        # passed every active technical filter.
         final_signal = "BUY_CALL" if option_type == "CE" else "BUY_PUT"
 
         confirmed_payload = {
@@ -743,7 +888,7 @@ class ScreenerEngine:
             **rsi_meta,
             **premium_rsi_meta,
             **gtp_meta,
-            "direction_source": "filters",
+            "direction_source": direction_source,
             "execution_allowed": True,
             "underlying_symbol": index_key,
             "option_type": option_type,
@@ -777,7 +922,7 @@ class ScreenerEngine:
             "market_filters": market_filters,
             "contract_filters": {
                 key: filters[key]
-                for key in ("delta", "theta", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
+                for key in ("delta", "theta", "vega_vix", "gamma", "spread", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
                 if key in filters
             },
             "signal": final_signal.lower(),
@@ -814,7 +959,46 @@ class ScreenerEngine:
             )
         ]
 
-    def _resolve_s9_direction_from_s1(
+    def _resolve_s9_target_index_macro_direction(
+        self,
+        *,
+        states_by_timeframe: dict[str, dict[str, SymbolIndicatorState]],
+        underlying_symbol: str,
+    ) -> tuple[str, str]:
+        """Resolve NIFTY/SENSEX direction from the completed 15m spot bar only."""
+        symbol = underlying_symbol.strip().upper()
+        state = (states_by_timeframe.get("s9_15m_completed") or {}).get(symbol)
+        if state is None:
+            logger.info("S9_15M_EMA20_DIRECTION symbol=%s completed_state=false direction=neutral", symbol)
+            return "neutral", "neutral"
+        ema20 = getattr(state.latest, "ema20", None)
+        if ema20 is None:
+            logger.info(
+                "S9_15M_EMA20_DIRECTION symbol=%s completed_state=true candle_time=%s close=%s ema20=None direction=neutral",
+                symbol,
+                state.latest.candle_time.isoformat(),
+                float(state.latest.close),
+            )
+            return "neutral", "neutral"
+        close = float(state.latest.close)
+        ema20_value = float(ema20)
+        if close > ema20_value:
+            direction, signal = "bullish", "buy"
+        elif close < ema20_value:
+            direction, signal = "bearish", "sell"
+        else:
+            direction, signal = "neutral", "neutral"
+        logger.info(
+            "S9_15M_EMA20_DIRECTION symbol=%s completed_state=true candle_time=%s close=%s ema20=%s direction=%s",
+            symbol,
+            state.latest.candle_time.isoformat(),
+            close,
+            ema20_value,
+            direction,
+        )
+        return direction, signal
+
+    def _resolve_s9_direction_from_trend_states(
         self,
         *,
         states_by_timeframe: dict[str, dict[str, SymbolIndicatorState]],
@@ -824,25 +1008,73 @@ class ScreenerEngine:
         if not target_symbol:
             return "neutral", "neutral"
 
-        state_main = (states_by_timeframe.get("3m", {}) or {}).get(target_symbol)
-        if state_main is None:
+        state_1h = (
+            states_by_timeframe.get("s9_60m_completed", states_by_timeframe.get("60m", {})) or {}
+        ).get(target_symbol)
+        state_15m = (
+            states_by_timeframe.get("s9_15m_completed", states_by_timeframe.get("15m", {})) or {}
+        ).get(target_symbol)
+        tf_1h = self._s9_ema9_direction(state_1h)
+        tf_15m = self._s9_ema9_direction(state_15m)
+        if state_1h is None or state_15m is None:
+            logger.info(
+                "S9_TREND_DIRECTION symbol=%s "
+                "60m_candle_time=%s 60m_close=%s 60m_ema9=%s 60m_direction=%s 60m_completed=%s "
+                "15m_candle_time=%s 15m_close=%s 15m_ema9=%s 15m_direction=%s 15m_completed=%s "
+                "final_direction=neutral",
+                target_symbol,
+                state_1h.latest.candle_time.isoformat() if state_1h is not None else None,
+                float(state_1h.latest.close) if state_1h is not None else None,
+                float(state_1h.latest.ema9) if state_1h is not None and state_1h.latest.ema9 is not None else None,
+                tf_1h,
+                str(state_1h is not None).lower(),
+                state_15m.latest.candle_time.isoformat() if state_15m is not None else None,
+                float(state_15m.latest.close) if state_15m is not None else None,
+                float(state_15m.latest.ema9) if state_15m is not None and state_15m.latest.ema9 is not None else None,
+                tf_15m,
+                str(state_15m is not None).lower(),
+            )
             return "neutral", "neutral"
 
-        state_10m = (states_by_timeframe.get("10m", {}) or {}).get(target_symbol)
-        state_15m = (states_by_timeframe.get("15m", {}) or {}).get(target_symbol)
-        signal, _, _, _ = self._resolve_s1_signal(
-            symbol=target_symbol,
-            state_5m=state_main,
-            state_10m=state_10m,
-            state_15m=state_15m,
-            now_market=None,
-        )
+        if tf_1h == "bullish" and tf_15m == "bullish":
+            final_direction, final_signal = "bullish", "strong_buy"
+        elif tf_1h == "bearish" and tf_15m == "bearish":
+            final_direction, final_signal = "bearish", "strong_sell"
+        else:
+            final_direction, final_signal = "neutral", "neutral"
 
-        if signal in {"strong_buy", "buy"}:
-            return ("bullish", "strong_buy" if signal == "strong_buy" else "buy")
-        if signal in {"strong_sell", "sell"}:
-            return ("bearish", "strong_sell" if signal == "strong_sell" else "sell")
-        return "neutral", "neutral"
+        logger.info(
+            "S9_TREND_DIRECTION symbol=%s "
+            "60m_candle_time=%s 60m_close=%s 60m_ema9=%s 60m_direction=%s 60m_completed=true "
+            "15m_candle_time=%s 15m_close=%s 15m_ema9=%s 15m_direction=%s 15m_completed=true "
+            "final_direction=%s",
+            target_symbol,
+            state_1h.latest.candle_time.isoformat(),
+            float(state_1h.latest.close),
+            float(state_1h.latest.ema9) if state_1h.latest.ema9 is not None else None,
+            tf_1h,
+            state_15m.latest.candle_time.isoformat(),
+            float(state_15m.latest.close),
+            float(state_15m.latest.ema9) if state_15m.latest.ema9 is not None else None,
+            tf_15m,
+            final_direction,
+        )
+        return final_direction, final_signal
+
+    @staticmethod
+    def _s9_ema9_direction(state: SymbolIndicatorState | None) -> str:
+        if state is None:
+            return "neutral"
+        ema9 = getattr(state.latest, "ema9", None)
+        if ema9 is None:
+            return "neutral"
+        close = float(state.latest.close)
+        ema9_value = float(ema9)
+        if close > ema9_value:
+            return "bullish"
+        if close < ema9_value:
+            return "bearish"
+        return "neutral"
 
     def _resolve_s9_effective_direction(
         self,
@@ -854,7 +1086,7 @@ class ScreenerEngine:
         underlying_symbol: str,
         states_by_timeframe: dict[str, dict[str, SymbolIndicatorState]],
     ) -> tuple[str, str, str]:
-        resolved_direction, resolved_signal = self._resolve_s9_direction_from_s1(
+        resolved_direction, resolved_signal = self._resolve_s9_direction_from_trend_states(
             states_by_timeframe=states_by_timeframe,
             underlying_symbol=underlying_symbol,
         )
@@ -1073,11 +1305,20 @@ class ScreenerEngine:
                 )
             ),
             "delta": (
-                "CE: +0.45 <= Delta <= +0.55; PE: -0.55 <= Delta <= -0.45"
+                "CE: +0.55 <= Delta <= +0.65; PE: -0.65 <= Delta <= -0.55"
                 if data.get("target_index_setup")
                 else "CE: 0.55 <= Delta <= +0.65; PE: -0.65 <= Delta <= -0.45"
             ),
-            "theta": "Ignored for index setup",
+            "theta": (
+                "Normalize provider theta points/day by premium; theta/premium*100 >= -0.05%"
+                if data.get("target_index_setup")
+                else "Ignored for index setup"
+            ),
+            "macro_trend": "Latest completed 15m spot close > EMA20 for CE or < EMA20 for PE",
+            "pcr_shift": "3-minute Volume PCR shift: CE >= +0.04; PE <= -0.04",
+            "spread": "Ask Price - Bid Price must be strictly less than INR 0.05",
+            "vega_vix": "Vega > 0 and India VIX < 18.0",
+            "gamma": "0.035 <= Gamma <= 0.055",
             "pcr": (
                 (
                     "Call PCR must be between 0.75 and 1.40"
@@ -1092,7 +1333,9 @@ class ScreenerEngine:
                 )
             ),
             "vwap": (
-                "Stock/BankNifty/FinNifty close must be above VWAP for CE and PE"
+                "Premium > VWAP and extension ((premium - VWAP) / VWAP) * 100 <= 2.5%"
+                if data.get("target_index_setup")
+                else "Stock/BankNifty/FinNifty close must be above VWAP for CE and PE"
                 if data.get("indicator") == "stock_vwap"
                 else "Option Premium > VWAP"
             ),
@@ -1107,9 +1350,9 @@ class ScreenerEngine:
                 )
             ),
             "order_book": (
-                "Bid volume >= 53% for CALL; Ask volume >= 53% for PUT"
+                "CE bid / PE ask imbalance must remain within 55%-58% for 5 consecutive seconds"
                 if data.get("target_index_setup")
-                else "Bid/Ask Imbalance between 55% and 60%"
+                else "Bid/Ask Imbalance between 55% and 58%"
             ),
             "oi_change_pct": (
                 "3-Min OI Change must be > +5% or < -1%"
@@ -1124,6 +1367,11 @@ class ScreenerEngine:
             "supertrend": "Supertrend",
             "delta": "Delta",
             "theta": "Theta",
+            "macro_trend": "15m EMA20 Macro Trend",
+            "pcr_shift": "3m Volume PCR Shift",
+            "spread": "Bid-Ask Spread",
+            "vega_vix": "Vega + India VIX",
+            "gamma": "Gamma",
             "pcr": "PCR",
             "vwap": "Premium VWAP",
             "volume_breakout": "3m Volume Breakout",
@@ -1132,17 +1380,19 @@ class ScreenerEngine:
         }
 
         actual_value = None
-        for key in ("delta", "theta", "pcr", "premium", "vwap", "stoch_rsi_k", "stoch_rsi_d", "supertrend", "volume_ratio", "volume", "bid_imbalance", "ask_imbalance", "oi_change_pct", "volume_change_pct"):
+        for key in ("delta", "theta_pct_of_premium", "theta", "pcr_shift", "spread", "vega", "india_vix", "gamma", "extension_pct", "pcr", "premium", "vwap", "stoch_rsi_k", "stoch_rsi_d", "supertrend", "volume_ratio", "volume", "bid_imbalance", "ask_imbalance", "oi_change_pct", "volume_change_pct"):
             if key in data:
                 actual_value = data.get(key)
                 break
         if actual_value is None and data:
             actual_value = data
 
+        target_weight = S9_TARGET_INDEX_FILTER_WEIGHTS.get(name) if data.get("target_index_setup") else None
+        weight = target_weight if target_weight is not None else S9_FILTER_WEIGHTS.get(name, 0)
         return {
             "name": labels.get(name, name),
-            "weight": S9_FILTER_WEIGHTS.get(name, 0),
-            "points": S9_FILTER_WEIGHTS.get(name, 0) if passed else 0,
+            "weight": weight,
+            "points": weight if passed else 0,
             "required_range": rules.get(name, ""),
             "rule": rules.get(name, ""),
             "actual_value": actual_value,
@@ -1171,7 +1421,7 @@ class ScreenerEngine:
 
     @staticmethod
     def _s9_strike_selection_mode(option_chain: OptionChainSnapshot, now_market: datetime, underlying: str | None = None) -> str:
-        return "atm"
+        return "delta_window" if ScreenerEngine._is_nifty_sensex_symbol(underlying or option_chain.underlying) else "atm"
 
     @staticmethod
     def _s9_itm_depth(contract: OptionContract, option_chain: OptionChainSnapshot, option_type: str) -> float:
@@ -1217,11 +1467,14 @@ class ScreenerEngine:
         is_stock_bank_finnifty = underlying in {"BANK NIFTY", "FINNIFTY"} or bool(
             config and config.get("instrument_type") == "stock"
         )
+        is_target_index = underlying in {"NIFTY 50", "SENSEX"}
         # Stocks, Bank Nifty, and Fin Nifty scan ATM plus two strikes on each
         # side; other underlyings retain their configured range.
         scan_count = 5 if is_stock_bank_finnifty else max(
             1, int(getattr(self._settings, "s9_strike_scan_count", 8))
         )
+        if is_target_index:
+            scan_count = max(9, scan_count)
         side_count = 2 if is_stock_bank_finnifty else max(1, scan_count // 2)
         candidates = [
             contract
@@ -1233,7 +1486,7 @@ class ScreenerEngine:
                 candidates,
                 atm_strike=option_chain.atm_strike,
                 side_count=side_count,
-                include_atm=is_stock_bank_finnifty,
+                include_atm=is_stock_bank_finnifty or is_target_index,
             )
         )
         candidates = [
@@ -1295,59 +1548,62 @@ class ScreenerEngine:
         macro_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         option_symbol = self._build_option_symbol(underlying, contract.strike, option_type)
-        contract_raw_checks = {
-            "delta": self._check_target_delta_option(option_symbol, option_type, contract) if target_index_setup else self._check_delta_option(option_symbol, option_type, contract),
-            "theta": self._check_theta_option(option_symbol, contract),
-            **(
-                {
-                    "supertrend": self._check_index_supertrend(
-                        option_state,
-                        direction,
-                        factor=supertrend_factor,
-                        target_index_setup=target_index_setup,
-                        source="option_premium",
-                    )
-                }
-                if apply_supertrend_filter
-                else {}
-            ),
-            "vwap": (
-                self._check_stock_vwap_trend(underlying_state, direction)
-                if (stock_setup or normalize_market_symbol(underlying) in {"BANK NIFTY", "FINNIFTY"})
-                else self._check_vwap_option(option_symbol, contract)
-            ),
-            **(
-                {
-                    "volume_breakout": (
-                        self._check_3m_volume_breakout(
+        if target_index_setup:
+            contract_raw_checks = {
+                "delta": self._check_target_delta_option(option_symbol, option_type, contract),
+                "theta": self._check_target_theta(contract),
+                "vega_vix": self._check_target_vega_vix(contract, macro_context),
+                "gamma": self._check_target_gamma(contract),
+                "spread": self._check_target_spread(contract),
+                "vwap": self._check_target_vwap_extension(option_symbol, contract, option_state=option_state),
+                "order_book": self._check_target_order_book(
+                    contract,
+                    direction,
+                    option_symbol=option_symbol,
+                    now_market=evaluation_time,
+                ),
+            }
+        else:
+            contract_raw_checks = {
+                "delta": self._check_delta_option(option_symbol, option_type, contract),
+                "theta": self._check_theta_option(option_symbol, contract),
+                **(
+                    {
+                        "supertrend": self._check_index_supertrend(
+                            option_state,
+                            direction,
+                            factor=supertrend_factor,
+                            target_index_setup=target_index_setup,
+                            source="option_premium",
+                        )
+                    }
+                    if apply_supertrend_filter
+                    else {}
+                ),
+                "vwap": (
+                    self._check_stock_vwap_trend(underlying_state, direction)
+                    if (stock_setup or normalize_market_symbol(underlying) in {"BANK NIFTY", "FINNIFTY"})
+                    else self._check_vwap_option(option_symbol, contract)
+                ),
+                **(
+                    {
+                        "volume_breakout": self._check_stock_3m_volume_breakout(
                             volume_breakout_state,
                             direction,
                             now_market=evaluation_time,
                         )
-                        if target_index_setup
-                        else self._check_stock_3m_volume_breakout(
-                            volume_breakout_state,
-                            direction,
-                            now_market=evaluation_time,
-                        )
-                    )
-                }
-                if volume_breakout_setup
-                else {}
-            ),
-            "order_book": (
-                self._check_target_order_book_buy(option_chain, contract)
-                if target_index_setup and direction == "bullish"
-                else self._check_target_order_book_sell(option_chain, contract)
-                if target_index_setup
-                else self._check_order_book_buy(option_chain, contract)
-                if direction == "bullish"
-                else self._check_order_book_sell(option_chain, contract)
-            ),
-        }
+                    }
+                    if volume_breakout_setup
+                    else {}
+                ),
+                "order_book": (
+                    self._check_order_book_buy(option_chain, contract)
+                    if direction == "bullish"
+                    else self._check_order_book_sell(option_chain, contract)
+                ),
+            }
         if apply_oi_change_filter:
-            oi_check = self._check_target_oi_change_pct if target_index_setup else self._check_oi_change_pct
-            contract_raw_checks["oi_change_pct"] = oi_check(
+            contract_raw_checks["oi_change_pct"] = self._check_oi_change_pct(
                 contract=contract,
                 option_chain=option_chain,
                 option_type=option_type,
@@ -1379,7 +1635,7 @@ class ScreenerEngine:
             usd_config=self._settings.usd_inr_risk_config,
             confluence_bonus=S9_MACRO_CONFLUENCE_BONUS,
         )
-        if macro_effects["crude_risk"]:
+        if macro_effects["crude_risk"] and not target_index_setup:
             filters["macro_crude_risk"] = {
                 "passed": False,
                 "status": "fail",
@@ -1409,7 +1665,7 @@ class ScreenerEngine:
             and not failed_filters
             and not unavailable_filters
         )
-        if technical_filters_passed:
+        if technical_filters_passed and not target_index_setup:
             score_bonus = min(4, max(0, int(macro_effects["macro_confirmation_score"])))
             raw_score += score_bonus
         macro_effects["macro_score_applied"] = score_bonus
@@ -1545,7 +1801,7 @@ class ScreenerEngine:
     def _s9_weighted_score(filters: dict[str, dict[str, Any]]) -> int:
         return int(
             sum(
-                S9_FILTER_WEIGHTS.get(name, 0)
+                int(item.get("weight") or S9_FILTER_WEIGHTS.get(name, 0))
                 for name, item in ScreenerEngine._s9_active_filters(filters).items()
                 if item.get("passed")
             )
@@ -1555,8 +1811,8 @@ class ScreenerEngine:
     def _s9_max_score(filters: dict[str, dict[str, Any]]) -> int:
         return int(
             sum(
-                S9_FILTER_WEIGHTS.get(name, 0)
-                for name in ScreenerEngine._s9_active_filters(filters)
+                int(item.get("weight") or S9_FILTER_WEIGHTS.get(name, 0))
+                for name, item in ScreenerEngine._s9_active_filters(filters).items()
             )
         )
 
@@ -1637,6 +1893,8 @@ class ScreenerEngine:
     def _s9_selection_reason(*, option_type: str | None, strike_selection_mode: str) -> str:
         if strike_selection_mode == "deep_itm":
             return "FULL_MATCH_DEEP_ITM"
+        if strike_selection_mode == "delta_window":
+            return "FULL_MATCH_DELTA_ELIGIBLE_WINDOW"
         return "FULL_MATCH_ATM_WINDOW"
 
     def _select_best_s9_contract_evaluation(
@@ -2640,23 +2898,191 @@ class ScreenerEngine:
         )
         return result
 
-    def _check_target_pcr(self, option_chain: OptionChainSnapshot, direction: str) -> dict[str, Any]:
-        pcr = self._calculate_pcr(option_chain)
-        result = {"passed": False, "reason": "", "data": {"pcr": pcr, "target_index_setup": True}}
+    @staticmethod
+    def _check_target_macro_trend(
+        state: SymbolIndicatorState | None,
+        direction: str,
+    ) -> dict[str, Any]:
+        data = {
+            "timeframe": "15m",
+            "completed_candle_only": True,
+            "close": None,
+            "ema20": None,
+            "target_index_setup": True,
+        }
+        if state is None:
+            return {"passed": False, "reason": "Completed 15m spot candle unavailable", "data": data}
+        ema20 = getattr(state.latest, "ema20", None)
+        data.update({"close": float(state.latest.close), "ema20": ema20, "candle_time": state.latest.candle_time.isoformat()})
+        if ema20 is None:
+            return {"passed": False, "reason": "Completed 15m spot EMA20 unavailable", "data": data}
+        close, ema20_value = float(state.latest.close), float(ema20)
+        passed = close > ema20_value if direction == "bullish" else close < ema20_value
+        comparator = ">" if direction == "bullish" else "<"
+        return {"passed": passed, "reason": f"Completed 15m spot close {close:.4f} {comparator} EMA20 {ema20_value:.4f}" if passed else "Completed 15m spot EMA20 direction mismatch", "data": data}
+
+    @staticmethod
+    def _target_microstructure_refresh_required(evaluation: dict[str, Any]) -> bool:
+        filters = evaluation.get("filters") if isinstance(evaluation.get("filters"), dict) else {}
+        return any(
+            (filters.get(name) or {}).get("status") == "unavailable"
+            for name in ("order_book", "spread")
+        )
+
+    def _sample_target_microstructure(
+        self,
+        *,
+        underlying: str,
+        contract: OptionContract,
+        direction: str,
+        option_symbol: str,
+    ) -> OptionContract | None:
+        """Poll real provider top-of-book data at one-second intervals for 5 seconds."""
+        if str(getattr(self._settings, "market_data_mode", "mock") or "mock").lower() != "live":
+            return None
+        if not self._dhan.configured:
+            return None
+
+        latest = contract
+        for sample_index in range(6):
+            started = time_module.monotonic()
+            try:
+                quote = self._dhan.get_option_market_depth(underlying, contract)
+                latest = replace(
+                    contract,
+                    bid_price=float(quote["bid_price"]),
+                    ask_price=float(quote["ask_price"]),
+                    bid_qty=float(quote["bid_qty"]),
+                    ask_qty=float(quote["ask_qty"]),
+                )
+                check = self._check_target_order_book(
+                    latest,
+                    direction,
+                    option_symbol=option_symbol,
+                    now_market=quote.get("observed_at"),
+                )
+                spread_check = self._check_target_spread(latest)
+                if not check.get("passed") and not (check.get("data") or {}).get("pending"):
+                    return latest
+                if not spread_check.get("passed"):
+                    return latest
+            except Exception as exc:  # noqa: BLE001 - provider failures must fail closed
+                side = "bid" if direction == "bullish" else "ask"
+                key = f"s9:order_book_sustain:{self._canonical_option_symbol(option_symbol)}:{side}"
+                self._cache.delete(key)
+                logger.warning(
+                    "S9 live microstructure unavailable option=%s sample=%s error=%s",
+                    option_symbol,
+                    sample_index + 1,
+                    exc,
+                )
+                return None
+            if sample_index < 5:
+                time_module.sleep(max(0.0, 1.0 - (time_module.monotonic() - started)))
+        return latest
+
+    def _record_s9_volume_pcr(
+        self,
+        option_chain: OptionChainSnapshot,
+        *,
+        now_market: datetime | None,
+    ) -> None:
+        pcr = self._calculate_volume_pcr(option_chain)
         if pcr is None:
-            result["reason"] = "PCR value unavailable"
-            return result
-        lower, upper = (0.75, 1.40) if direction == "bullish" else (0.60, 1.25)
-        result["passed"] = lower <= pcr <= upper
-        result["reason"] = f"PCR {pcr:.3f} {'within' if result['passed'] else 'outside'} range [{lower:.2f}, {upper:.2f}]"
-        return result
+            return
+        observed_at = now_market or option_chain.snapshot_time
+        key = self._s9_volume_pcr_history_key(option_chain.underlying)
+        raw = self._cache.get_json(key)
+        history = [row for row in raw if isinstance(row, dict)] if isinstance(raw, list) else []
+        timestamp = observed_at.isoformat()
+        history = [row for row in history if str(row.get("time") or "") != timestamp]
+        history.append({"time": timestamp, "volume_pcr": pcr})
+        cutoff = self._as_market_datetime(observed_at) - timedelta(minutes=10)
+        retained: list[dict[str, Any]] = []
+        for row in history:
+            try:
+                row_time = self._as_market_datetime(datetime.fromisoformat(str(row.get("time"))))
+            except (TypeError, ValueError):
+                continue
+            if row_time >= cutoff:
+                retained.append(row)
+        self._cache.set_json(key, retained[-20:], ttl_seconds=900)
+
+    def _check_target_volume_pcr_shift(
+        self,
+        option_chain: OptionChainSnapshot,
+        direction: str,
+        *,
+        now_market: datetime | None,
+    ) -> dict[str, Any]:
+        current = self._calculate_volume_pcr(option_chain)
+        data: dict[str, Any] = {
+            "current_volume_pcr": current,
+            "previous_volume_pcr": None,
+            "pcr_shift": None,
+            "timeframe": "3m",
+            "source": "option_chain_traded_volume",
+            "target_index_setup": True,
+        }
+        if current is None:
+            return {"passed": False, "reason": "Volume PCR unavailable: CE or PE traded volume missing/zero", "data": data}
+        observed_at = self._as_market_datetime(now_market or option_chain.snapshot_time)
+        target_time = observed_at - timedelta(minutes=3)
+        raw = self._cache.get_json(self._s9_volume_pcr_history_key(option_chain.underlying))
+        candidates: list[tuple[datetime, float]] = []
+        for row in raw if isinstance(raw, list) else []:
+            if not isinstance(row, dict):
+                continue
+            try:
+                row_time = self._as_market_datetime(datetime.fromisoformat(str(row.get("time"))))
+                value = float(row.get("volume_pcr"))
+            except (TypeError, ValueError):
+                continue
+            if row_time <= target_time and target_time - row_time <= timedelta(seconds=75):
+                candidates.append((row_time, value))
+        if not candidates:
+            return {"passed": False, "reason": "3-minute Volume PCR history unavailable", "data": data}
+        previous_time, previous = max(candidates, key=lambda item: item[0])
+        shift = current - previous
+        threshold = 0.04 if direction == "bullish" else -0.04
+        passed = shift >= threshold if direction == "bullish" else shift <= threshold
+        data.update(
+            {
+                "previous_volume_pcr": previous,
+                "previous_time": previous_time.isoformat(),
+                "pcr_shift": shift,
+                "threshold": threshold,
+            }
+        )
+        comparator = ">=" if direction == "bullish" else "<="
+        return {
+            "passed": passed,
+            "reason": f"3m Volume PCR shift {shift:+.4f} {'passes' if passed else 'fails'} {comparator} {threshold:+.2f}",
+            "data": data,
+        }
+
+    @staticmethod
+    def _calculate_volume_pcr(option_chain: OptionChainSnapshot) -> float | None:
+        ce_volume = sum(max(0.0, float(row.volume or 0.0)) for row in option_chain.contracts if str(row.option_type).upper() == "CE")
+        pe_volume = sum(max(0.0, float(row.volume or 0.0)) for row in option_chain.contracts if str(row.option_type).upper() == "PE")
+        if ce_volume <= 0 or pe_volume < 0:
+            return None
+        return pe_volume / ce_volume
+
+    @staticmethod
+    def _s9_volume_pcr_history_key(symbol: str) -> str:
+        return f"s9:volume_pcr_history:{normalize_market_symbol(symbol)}"
+
+    def _as_market_datetime(self, value: datetime) -> datetime:
+        market_tz = ZoneInfo(self._settings.market_timezone)
+        return value.astimezone(market_tz) if value.tzinfo else value.replace(tzinfo=market_tz)
 
     def _check_target_delta_option(self, option_symbol: str, option_type: str, contract: OptionContract) -> dict[str, Any]:
         delta = getattr(contract, "delta", None)
         if delta is None:
-            return {"passed": False, "reason": "delta_missing", "data": {}}
+            return {"passed": False, "reason": "delta_missing", "data": {"target_index_setup": True}}
         delta = float(delta)
-        lower, upper = (0.45, 0.55) if str(option_type).upper() == "CE" else (-0.55, -0.45)
+        lower, upper = (0.55, 0.65) if str(option_type).upper() == "CE" else (-0.65, -0.55)
         passed = lower <= delta <= upper
         return {
             "passed": passed,
@@ -2664,27 +3090,157 @@ class ScreenerEngine:
             "data": {"delta": delta, "option_symbol": option_symbol, "source": "provider_response", "target_index_setup": True},
         }
 
-    def _check_target_order_book_buy(self, option_chain: OptionChainSnapshot, contract: OptionContract) -> dict[str, Any]:
-        value = self._get_contract_bid_imbalance(contract) or self._get_bid_imbalance(option_chain)
-        passed = value is not None and value >= 0.53
-        return {"passed": passed, "reason": "Bid volume >= 53%" if passed else "Bid volume below 53% or unavailable", "data": {"bid_imbalance": value, "target_index_setup": True}}
-
-    def _check_target_order_book_sell(self, option_chain: OptionChainSnapshot, contract: OptionContract) -> dict[str, Any]:
-        value = self._get_contract_ask_imbalance(contract) or self._get_ask_imbalance(option_chain)
-        passed = value is not None and value >= 0.53
-        return {"passed": passed, "reason": "Ask volume >= 53%" if passed else "Ask volume below 53% or unavailable", "data": {"ask_imbalance": value, "target_index_setup": True}}
-
-    def _check_target_oi_change_pct(self, *, contract: OptionContract, option_chain: OptionChainSnapshot, option_type: str, option_symbol: str) -> dict[str, Any]:
-        try:
-            value = float(contract.oi_change)
-        except (TypeError, ValueError):
-            value = None
-        passed = value is not None and (value < -1.0 or value > 5.0)
-        return {
-            "passed": passed,
-            "reason": f"3m OI change {value:.2f}% {'passed' if passed else 'outside'} range (< -1% or > +5%)" if value is not None else "OI change percentage unavailable",
-            "data": {"oi_change_pct": value, "timeframe": "3m", "option_symbol": option_symbol, "option_type": option_type, "target_index_setup": True},
+    def _check_target_vwap_extension(
+        self,
+        option_symbol: str,
+        contract: OptionContract,
+        *,
+        option_state: SymbolIndicatorState | None = None,
+    ) -> dict[str, Any]:
+        state_vwap = getattr(option_state.latest, "vwap", None) if option_state is not None else None
+        payload = self._get_vwap_payload_from_option_symbol(option_symbol) if state_vwap is None else None
+        vwap = state_vwap if state_vwap is not None else payload.get("vwap") if isinstance(payload, dict) else None
+        data = {
+            "premium": float(contract.ltp),
+            "vwap": vwap,
+            "extension_pct": None,
+            "max_extension_pct": 2.5,
+            "source": "option_premium_3m_indicator_state" if state_vwap is not None else "option_premium_5m_vwap_cache",
+            "target_index_setup": True,
         }
+        try:
+            vwap_value = float(vwap)
+        except (TypeError, ValueError):
+            return {"passed": False, "reason": "Premium VWAP unavailable", "data": data}
+        if vwap_value <= 0:
+            return {"passed": False, "reason": "Premium VWAP missing or non-positive", "data": data}
+        extension = ((float(contract.ltp) - vwap_value) / vwap_value) * 100.0
+        data["vwap"] = vwap_value
+        data["extension_pct"] = extension
+        floor_passed = float(contract.ltp) > vwap_value
+        passed = floor_passed and extension <= 2.5 + 1e-12
+        if not floor_passed:
+            reason = f"Premium {contract.ltp:.4f} must be above VWAP {vwap_value:.4f}"
+        elif not passed:
+            reason = f"Premium VWAP extension {extension:.4f}% exceeds 2.5%"
+        else:
+            reason = f"Premium above VWAP with extension {extension:.4f}% <= 2.5%"
+        return {"passed": passed, "reason": reason, "data": data}
+
+    @staticmethod
+    def _check_target_spread(contract: OptionContract) -> dict[str, Any]:
+        bid, ask = getattr(contract, "bid_price", None), getattr(contract, "ask_price", None)
+        data = {"bid_price": bid, "ask_price": ask, "spread": None, "max_spread": 0.05, "target_index_setup": True}
+        try:
+            spread_decimal = Decimal(str(ask)) - Decimal(str(bid))
+            spread = float(spread_decimal)
+        except (InvalidOperation, TypeError, ValueError):
+            return {"passed": False, "reason": "Bid/ask prices unavailable", "data": data}
+        data["spread"] = spread
+        passed = Decimal("0") <= spread_decimal < Decimal("0.05")
+        return {"passed": passed, "reason": f"Spread INR {spread:.4f} {'<' if passed else 'is not <'} INR 0.05", "data": data}
+
+    def _check_target_theta(self, contract: OptionContract) -> dict[str, Any]:
+        theta, premium = getattr(contract, "theta", None), getattr(contract, "ltp", None)
+        data = {
+            "theta": theta,
+            "premium": premium,
+            "theta_pct_of_premium": None,
+            "minimum_theta_pct": -0.05,
+            "provider": str(getattr(self._settings.dhan, "provider", "") or "unknown").lower(),
+            # Groww returns raw theta as option-price decay, not as a
+            # percentage of premium. The strategy normalizes that raw value.
+            "provider_unit": "absolute INR option-premium points per day",
+            "target_index_setup": True,
+        }
+        try:
+            theta_value, premium_value = float(theta), float(premium)
+        except (TypeError, ValueError):
+            return {"passed": False, "reason": "Theta or option premium unavailable", "data": data}
+        if premium_value <= 0:
+            return {"passed": False, "reason": "Option premium missing or non-positive for theta normalization", "data": data}
+        theta_pct = (theta_value / premium_value) * 100.0
+        data["theta_pct_of_premium"] = theta_pct
+        passed = theta_pct >= -0.05
+        return {"passed": passed, "reason": f"Normalized theta {theta_pct:.6f}% {'within' if passed else 'exceeds'} -0.05% daily decay cap", "data": data}
+
+    @staticmethod
+    def _check_target_vega_vix(contract: OptionContract, macro_context: dict[str, Any] | None) -> dict[str, Any]:
+        vega = getattr(contract, "vega", None)
+        vix_payload = (macro_context or {}).get("india_vix")
+        vix = vix_payload.get("value") if isinstance(vix_payload, dict) else None
+        data = {"vega": vega, "india_vix": vix, "vega_source": "provider_greeks", "vix_source": "macro_context.india_vix.value", "target_index_setup": True}
+        try:
+            vega_value, vix_value = float(vega), float(vix)
+        except (TypeError, ValueError):
+            return {"passed": False, "reason": "Vega or India VIX unavailable", "data": data}
+        passed = vega_value > 0 and vix_value < 18.0
+        return {"passed": passed, "reason": f"Vega {vega_value:.6f} {'>' if vega_value > 0 else '<='} 0 and India VIX {vix_value:.4f} {'<' if vix_value < 18 else '>='} 18.0", "data": data}
+
+    @staticmethod
+    def _check_target_gamma(contract: OptionContract) -> dict[str, Any]:
+        gamma = getattr(contract, "gamma", None)
+        data = {"gamma": gamma, "source": "provider_greeks", "target_index_setup": True}
+        try:
+            value = float(gamma)
+        except (TypeError, ValueError):
+            return {"passed": False, "reason": "Gamma unavailable", "data": data}
+        passed = 0.035 <= value <= 0.055
+        return {"passed": passed, "reason": f"Gamma {value:.6f} {'within' if passed else 'outside'} [0.035, 0.055]", "data": data}
+
+    def _check_target_order_book(
+        self,
+        contract: OptionContract,
+        direction: str,
+        *,
+        option_symbol: str,
+        now_market: datetime | None,
+    ) -> dict[str, Any]:
+        imbalance = self._get_contract_bid_imbalance(contract) if direction == "bullish" else self._get_contract_ask_imbalance(contract)
+        side = "bid" if direction == "bullish" else "ask"
+        data: dict[str, Any] = {
+            f"{side}_imbalance": imbalance,
+            "minimum": 0.55,
+            "maximum": 0.58,
+            "required_consecutive_seconds": 5,
+            "sustained_seconds": 0.0,
+            "source": "provider_top_of_book_quantities",
+            "target_index_setup": True,
+        }
+        key = f"s9:order_book_sustain:{self._canonical_option_symbol(option_symbol)}:{side}"
+        if imbalance is None:
+            self._cache.delete(key)
+            return {"passed": False, "reason": f"Live {side} volume imbalance unavailable", "data": data}
+        if not 0.55 <= imbalance <= 0.58:
+            self._cache.delete(key)
+            return {"passed": False, "reason": f"Live {side} imbalance {imbalance:.2%} outside [55%, 58%]", "data": data}
+        observed_at = self._as_market_datetime(now_market or datetime.now(ZoneInfo(self._settings.market_timezone)))
+        raw = self._cache.get_json(key)
+        samples = list(raw) if isinstance(raw, list) else []
+        second = observed_at.replace(microsecond=0)
+        parsed: list[datetime] = []
+        for value in samples:
+            try:
+                parsed.append(self._as_market_datetime(datetime.fromisoformat(str(value))))
+            except ValueError:
+                continue
+        parsed.append(second)
+        parsed = sorted(set(parsed))
+        consecutive = [parsed[-1]]
+        for value in reversed(parsed[:-1]):
+            gap = (consecutive[0] - value).total_seconds()
+            if 0 < gap <= 1.25:
+                consecutive.insert(0, value)
+            else:
+                break
+        self._cache.set_json(key, [value.isoformat() for value in consecutive[-7:]], ttl_seconds=15)
+        sustained = (consecutive[-1] - consecutive[0]).total_seconds()
+        data["sustained_seconds"] = sustained
+        data["sample_count"] = len(consecutive)
+        if sustained < 5.0:
+            data["pending"] = True
+            return {"passed": False, "reason": f"Valid {side} imbalance sustained for {sustained:.1f}s; 5 consecutive seconds required", "data": data}
+        return {"passed": True, "reason": f"Valid {side} imbalance {imbalance:.2%} sustained for {sustained:.1f}s", "data": data}
 
     @staticmethod
     def _is_index_symbol(symbol: str) -> bool:
@@ -2827,12 +3383,17 @@ class ScreenerEngine:
             return result
 
         shift = current_pcr - previous_pcr
-        result["data"] = {"pcr_shift": shift, "previous_pcr": previous_pcr, "current_pcr": current_pcr}
-        result["passed"] = shift >= -0.05
+        result["data"] = {
+            "pcr_shift": shift,
+            "previous_pcr": previous_pcr,
+            "current_pcr": current_pcr,
+            "timeframe": "3m",
+        }
+        result["passed"] = 0.03 <= shift <= 0.05
         result["reason"] = (
-            f"PCR shift {shift:.3f} within tolerance [-0.05, inf)"
+            f"PCR shift {shift:.3f} within CE buying range [+0.03, +0.05] in 3 minutes"
             if result["passed"]
-            else f"PCR shift {shift:.3f} below minimum -0.05"
+            else f"PCR shift {shift:.3f} outside CE buying range [+0.03, +0.05] in 3 minutes"
         )
         return result
 
@@ -2861,7 +3422,7 @@ class ScreenerEngine:
         option_chain: OptionChainSnapshot,
         contract: OptionContract | None = None,
     ) -> dict[str, Any]:
-        """Check BUY order book: Bid Imbalance between 55% and 60%."""
+        """Check BUY order book: Bid Imbalance between 55% and 58%."""
         result = {"passed": False, "reason": "", "data": {}}
         
         bid_imbalance = self._get_contract_bid_imbalance(contract)
@@ -2873,12 +3434,12 @@ class ScreenerEngine:
             result["reason"] = "Bid imbalance unavailable"
             return result
         
-        if not (0.55 <= bid_imbalance <= 0.60):
-            result["reason"] = f"Bid imbalance {bid_imbalance:.2%} outside range [55%, 60%]"
+        if not (0.55 <= bid_imbalance <= 0.58):
+            result["reason"] = f"Bid imbalance {bid_imbalance:.2%} outside range [55%, 58%]"
             return result
         
         result["passed"] = True
-        result["reason"] = f"Bid imbalance {bid_imbalance:.2%} within [55%, 60%]"
+        result["reason"] = f"Bid imbalance {bid_imbalance:.2%} within [55%, 58%]"
         result["data"] = {"bid_imbalance": bid_imbalance, "source": source}
         return result
 
@@ -3007,12 +3568,17 @@ class ScreenerEngine:
             return result
 
         shift = current_pcr - previous_pcr
-        result["data"] = {"pcr_shift": shift, "previous_pcr": previous_pcr, "current_pcr": current_pcr}
-        result["passed"] = shift <= 0.05
+        result["data"] = {
+            "pcr_shift": shift,
+            "previous_pcr": previous_pcr,
+            "current_pcr": current_pcr,
+            "timeframe": "3m",
+        }
+        result["passed"] = -0.05 <= shift <= -0.03
         result["reason"] = (
-            f"PCR shift {shift:.3f} within tolerance (-inf, 0.05]"
+            f"PCR shift {shift:.3f} within PE buying range [-0.05, -0.03] in 3 minutes"
             if result["passed"]
-            else f"PCR shift {shift:.3f} above maximum 0.05"
+            else f"PCR shift {shift:.3f} outside PE buying range [-0.05, -0.03] in 3 minutes"
         )
         return result
 
@@ -3041,7 +3607,7 @@ class ScreenerEngine:
         option_chain: OptionChainSnapshot,
         contract: OptionContract | None = None,
     ) -> dict[str, Any]:
-        """Check SELL order book: Ask Imbalance between 55% and 60%."""
+        """Check SELL order book: Ask Imbalance between 55% and 58%."""
         result = {"passed": False, "reason": "", "data": {}}
         
         ask_imbalance = self._get_contract_ask_imbalance(contract)
@@ -3053,12 +3619,12 @@ class ScreenerEngine:
             result["reason"] = "Ask imbalance unavailable"
             return result
         
-        if not (0.55 <= ask_imbalance <= 0.60):
-            result["reason"] = f"Ask imbalance {ask_imbalance:.2%} outside range [55%, 60%]"
+        if not (0.55 <= ask_imbalance <= 0.58):
+            result["reason"] = f"Ask imbalance {ask_imbalance:.2%} outside range [55%, 58%]"
             return result
         
         result["passed"] = True
-        result["reason"] = f"Ask imbalance {ask_imbalance:.2%} within [55%, 60%]"
+        result["reason"] = f"Ask imbalance {ask_imbalance:.2%} within [55%, 58%]"
         result["data"] = {"ask_imbalance": ask_imbalance, "source": source}
         return result
 

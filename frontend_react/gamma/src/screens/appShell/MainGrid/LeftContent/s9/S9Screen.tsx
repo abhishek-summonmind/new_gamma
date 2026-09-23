@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 import { Loader2, Trophy } from 'lucide-react'
 
 import { useS9 } from '../../../../../features/hooks/useS9'
+import DryRunTradesTable from './DryRunTradesTable'
 
 const optionTypeLabel = (value: any) => {
   const type = String(value || '').toUpperCase()
@@ -36,32 +37,71 @@ const formatStrike = (value: any, optionType: any) => {
 }
 
 const filterColumns = [
-  { key: 'sweep', label: 'Sweep / EMA9' },
-  { key: 'stoch_rsi', label: 'Stoch RSI' },
-  { key: 'supertrend', label: 'Super Trend' },
-  { key: 'delta', label: 'Delta' },
-  { key: 'pcr', label: 'PCR' },
-  { key: 'vwap', label: 'VWAP' },
-  { key: 'order_book', label: 'Order Book' },
-  { key: 'volume_breakout', label: '3/5 Vol' },
+  { key: 'sweep', targetKey: 'macro_trend', label: 'SWEEP / EMA9 / 15M EMA20' },
+  { key: 'stoch_rsi', targetKey: 'vwap', label: 'STOCH RSI / VWAP CAP' },
+  { key: 'supertrend', targetKey: 'spread', label: 'SUPER TREND / SPREAD' },
+  { key: 'delta', targetKey: 'delta', label: 'DELTA' },
+  { key: 'pcr', targetKey: 'pcr_shift', label: 'PCR / PCR SHIFT' },
+  { key: 'vwap', targetKey: 'theta', label: 'VWAP / THETA' },
+  { key: 'order_book', targetKey: 'order_book', label: 'ORDER BOOK' },
+  { key: 'volume_breakout', targetKey: 'vega_vix', label: '3/5 VOL / VEGA-VIX' },
 ]
 
-const filterStatus = (payload: any, key: string): 'pass' | 'fail' | 'na' => {
+const isTargetIndex = (payload: any) => {
+  const symbol = String(payload?.underlying_symbol || '').toUpperCase()
+  return symbol === 'NIFTY 50' || symbol === 'SENSEX'
+}
+
+const backendFilter = (payload: any, key: string) => {
   const stored = payload?.stored_filter_row || null
   const storedValue = stored
     ? key === 'sweep'
       ? stored.sweep ?? stored.ema9
       : stored[key]
     : undefined
-  if (storedValue === true) return 'pass'
-  if (storedValue === false) return 'fail'
-
   const filters = payload?.filters && typeof payload.filters === 'object'
     ? payload.filters
     : {}
   const filter = filters[key] || (key === 'sweep' ? filters.ema9 : null)
-  if (!filter || typeof filter !== 'object' || filter.data?.ignored) return 'na'
-  return filter.passed ? 'pass' : 'fail'
+  if (filter && typeof filter === 'object') return filter
+  if (storedValue === true || storedValue === false) {
+    return { passed: storedValue, status: storedValue ? 'pass' : 'fail' }
+  }
+  return null
+}
+
+const filterStatus = (payload: any, key: string): 'pass' | 'fail' | 'na' => {
+  const filter = backendFilter(payload, key)
+  if (!filter || filter.data?.ignored) return 'na'
+  if (filter.status === 'unavailable') return 'na'
+  if (filter.status === 'pass' || filter.passed === true) return 'pass'
+  if (filter.status === 'fail' || filter.passed === false) return 'fail'
+  return 'na'
+}
+
+const formatTooltipValue = (value: any) => {
+  if (value === null || value === undefined || value === '') return 'UNAVAILABLE'
+  if (typeof value === 'object') {
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
+const filterTooltip = (payload: any, key: string) => {
+  const filter = backendFilter(payload, key)
+  if (!filter) return 'Actual: UNAVAILABLE | Required: backend payload unavailable'
+  const actual = filter.actual_value ?? filter.data
+  const required = filter.required_range || filter.rule || 'backend rule unavailable'
+  return `Actual: ${formatTooltipValue(actual)} | Required: ${required}`
+}
+
+const filterKeyForRow = (payload: any, filter: typeof filterColumns[number]) => {
+  if (isTargetIndex(payload)) return filter.targetKey
+  return filter.key
 }
 
 const formatScore = (payload: any, item: any) => {
@@ -139,7 +179,7 @@ const FilterBadge = ({ status }: { status: 'pass' | 'fail' | 'na' }) => (
           : 'border-gray-200 bg-gray-50 text-gray-500'
     }`}
   >
-    {status === 'pass' ? 'Pass' : status === 'fail' ? 'Fail' : '-'}
+    {status === 'pass' ? 'PASS' : status === 'fail' ? 'FAIL' : 'UNAVAILABLE'}
   </span>
 )
 
@@ -305,11 +345,14 @@ function S9Screen() {
                   <td className="px-px py-2 font-bold text-[#027A48]">{displayValue(levels.support, 2)}</td>
                   <td className="px-px py-2 font-bold text-[#B42318]">{displayValue(levels.resistance, 2)}</td>
                   <td className="px-px py-2 font-bold">{displayValue(passed)}/{displayValue(total)}</td>
-                  {filterColumns.map((filter) => (
-                    <td key={filter.key} className="px-px py-2">
-                      <FilterBadge status={filterStatus(payload, filter.key)} />
-                    </td>
-                  ))}
+                  {filterColumns.map((filter) => {
+                    const filterKey = filterKeyForRow(payload, filter)
+                    return (
+                      <td key={filter.key} className="px-px py-2" title={filterTooltip(payload, filterKey)}>
+                        <FilterBadge status={filterStatus(payload, filterKey)} />
+                      </td>
+                    )
+                  })}
                   <td className="px-px py-2 font-semibold">{formatScore(payload, item)}</td>
                   <td className="px-px py-2 font-semibold">{formatTime(payload.signal_time)}</td>
                   <td className="px-px py-2">
@@ -321,6 +364,7 @@ function S9Screen() {
           </tbody>
         </table>
       </div>
+      <DryRunTradesTable />
     </article>
   )
 }

@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..config import DhanSettings, Settings, get_settings
+from ..config import DhanSettings, Settings, get_settings, normalize_market_symbol
 from .dhan_service import DhanService
 from .option_types import OptionChainSnapshot, OptionContract
 
@@ -134,6 +134,15 @@ class DhanClient:
             raise RuntimeError("DHAN_ACCESS_TOKEN and DHAN_CLIENT_ID are required for Dhan API calls.")
         return self._service.get_option_chain(symbol, depth=depth)
 
+    def get_option_market_depth(
+        self,
+        underlying: str,
+        contract: OptionContract,
+    ) -> dict[str, Any]:
+        if not self.configured:
+            raise RuntimeError("Live provider credentials are missing for option market depth")
+        return self._service.get_option_market_depth(underlying, contract)
+
     def get_nifty_option_chain(self, depth: int | None = None) -> OptionChainSnapshot:
         if not self.configured:
             if self._provider == "groww":
@@ -199,6 +208,8 @@ class DhanClient:
         atm_strike = int(round(min(all_strikes, key=lambda strike: abs(strike - spot_price))))
 
         chain_depth = depth if depth is not None else self._dhan_settings.option_chain_depth
+        if normalize_market_symbol(underlying_symbol) in {"NIFTY 50", "SENSEX"}:
+            chain_depth = max(4, int(chain_depth))
         selected_strikes = self._slice_strikes_around_atm(all_strikes, atm_strike, chain_depth)
         selected_set = set(selected_strikes)
 
@@ -257,6 +268,8 @@ class DhanClient:
         greeks = payload.get("greeks") if isinstance(payload.get("greeks"), dict) else {}
         delta = DhanClient._optional_float(greeks.get("delta") or payload.get("delta"))
         theta = DhanClient._optional_float(greeks.get("theta") or payload.get("theta"))
+        vega = DhanClient._optional_float(greeks.get("vega") or payload.get("vega"))
+        gamma = DhanClient._optional_float(greeks.get("gamma") or payload.get("gamma"))
         bid_price = DhanClient._optional_float(payload.get("bid_price") or payload.get("bidPrice") or payload.get("best_bid_price"))
         ask_price = DhanClient._optional_float(payload.get("ask_price") or payload.get("askPrice") or payload.get("best_ask_price"))
         bid_qty = DhanClient._optional_float(payload.get("bid_qty") or payload.get("bidQty") or payload.get("best_bid_qty"))
@@ -276,6 +289,8 @@ class DhanClient:
             ask_price=ask_price,
             bid_qty=bid_qty,
             ask_qty=ask_qty,
+            vega=vega,
+            gamma=gamma,
         )
 
     @staticmethod

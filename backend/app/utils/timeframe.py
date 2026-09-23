@@ -41,7 +41,9 @@ def resample_ohlcv(
     timezone_name: str,
     *,
     market_open_time: str = "09:15",
+    market_close_time: str = "15:30",
     now_market: datetime | None = None,
+    completed_only: bool = False,
 ) -> pd.DataFrame:
     minutes = timeframe_to_minutes(timeframe)
     if frame.empty:
@@ -57,7 +59,7 @@ def resample_ohlcv(
             f"{minutes}min",
             origin="start_day",
             offset=offset,
-            closed="right",
+            closed="left" if completed_only else "right",
             label="right",
         )
         .agg(
@@ -72,8 +74,27 @@ def resample_ohlcv(
         .dropna(subset=["open", "high", "low", "close"])
     )
 
-    if now_market is not None and not aggregated.empty:
-        market_time = now_market
+    if completed_only and not aggregated.empty:
+        close_hours, close_minutes = _parse_hhmm(market_close_time)
+        session_minutes = ((close_hours * 60) + close_minutes) - ((open_hours * 60) + open_minutes)
+        candle_end_minutes = (
+            (aggregated.index.hour * 60)
+            + aggregated.index.minute
+            - ((open_hours * 60) + open_minutes)
+        )
+        full_session_candle = (
+            (candle_end_minutes > 0)
+            & (candle_end_minutes <= session_minutes)
+            & ((candle_end_minutes % minutes) == 0)
+        )
+        aggregated = aggregated.loc[full_session_candle]
+
+    completion_cutoff = now_market
+    if completed_only and completion_cutoff is None and not normalized.empty:
+        completion_cutoff = normalized.index[-1].to_pydatetime()
+
+    if completion_cutoff is not None and not aggregated.empty:
+        market_time = completion_cutoff
         if isinstance(market_time, pd.Timestamp):
             market_time = market_time.to_pydatetime()
 

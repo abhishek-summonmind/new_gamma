@@ -140,7 +140,7 @@ class DhanService:
             interval = self._parse_timeframe_to_minutes(timeframe)
             if self._provider == "groww":
                 current = now_market or datetime.now()
-                lookback = int(lookback_days or (self._settings.intraday_fetch_days if self._settings else 5))
+                lookback = int(lookback_days or (self._settings.intraday_fetch_days if self._settings else 2))
                 fetch_from = current - timedelta(days=max(1, lookback))
                 return self.get_groww_intraday_ohlc(
                     trading_symbol=symbol,
@@ -152,7 +152,7 @@ class DhanService:
             security_id, exchange_segment, instrument = self._resolve_symbol_context(symbol)
 
             current = now_market or datetime.now()
-            lookback = int(lookback_days or (self._settings.intraday_fetch_days if self._settings else 5))
+            lookback = int(lookback_days or (self._settings.intraday_fetch_days if self._settings else 2))
             fetch_from = current - timedelta(days=max(1, lookback))
 
             payload = {
@@ -210,6 +210,87 @@ class DhanService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("OHLC fetch failed for %s (%s): %s", symbol, timeframe, exc)
             return empty
+
+    def get_option_market_depth(
+        self,
+        underlying: str,
+        contract: OptionContract,
+    ) -> dict[str, Any]:
+        """Fetch one uncached top-of-book snapshot for an exact option contract."""
+        symbol = normalize_market_symbol(underlying)
+        config = SYMBOL_CONFIG.get(symbol) or {}
+        security_id = str(contract.security_id or "").strip()
+        if not security_id:
+            raise RuntimeError("Option contract security/trading symbol is missing")
+
+        if self._provider == "groww":
+            response = self.get_json(
+                "/live-data/quote",
+                params={
+                    "exchange": str(config.get("option_exchange") or "NSE").upper(),
+                    "segment": str(getattr(self._settings, "groww_fno_segment", "FNO") or "FNO").upper(),
+                    "trading_symbol": security_id,
+                },
+            )
+            payload = response.get("payload") if isinstance(response, dict) else None
+            if not isinstance(payload, dict):
+                raise RuntimeError("Groww quote response has no payload")
+            source = "groww_live_data_quote"
+        else:
+            exchange = str(config.get("option_exchange") or "NSE").upper()
+            exchange_segment = "BSE_FNO" if exchange == "BSE" else self._dhan.options_exchange_segment
+            response = self.post_json(
+                "/marketfeed/quote",
+                {exchange_segment: [int(security_id)]},
+            )
+            data = response.get("data") if isinstance(response, dict) else None
+            segment_payload = data.get(exchange_segment) if isinstance(data, dict) else None
+            payload = segment_payload.get(security_id) if isinstance(segment_payload, dict) else None
+            if payload is None and isinstance(segment_payload, dict):
+                payload = segment_payload.get(int(security_id))
+            if not isinstance(payload, dict):
+                raise RuntimeError("Dhan quote response has no contract payload")
+            source = "dhan_marketfeed_quote"
+
+        depth = payload.get("depth") if isinstance(payload.get("depth"), dict) else {}
+        buy_rows = depth.get("buy") if isinstance(depth.get("buy"), list) else []
+        sell_rows = depth.get("sell") if isinstance(depth.get("sell"), list) else []
+        bid_row = buy_rows[0] if buy_rows and isinstance(buy_rows[0], dict) else {}
+        ask_row = sell_rows[0] if sell_rows and isinstance(sell_rows[0], dict) else {}
+        bid_price = self._optional_float(
+            payload.get("bid_price") or payload.get("best_bid_price") or bid_row.get("price")
+        )
+        ask_price = self._optional_float(
+            payload.get("offer_price") or payload.get("ask_price")
+            or payload.get("best_ask_price") or ask_row.get("price")
+        )
+        bid_qty = self._optional_float(
+            payload.get("bid_quantity") or payload.get("bid_qty") or bid_row.get("quantity")
+        )
+        ask_qty = self._optional_float(
+            payload.get("offer_quantity") or payload.get("ask_quantity")
+            or payload.get("ask_qty") or ask_row.get("quantity")
+        )
+        missing = [
+            name
+            for name, value in (
+                ("bid_price", bid_price),
+                ("ask_price", ask_price),
+                ("bid_quantity", bid_qty),
+                ("ask_quantity", ask_qty),
+            )
+            if value is None
+        ]
+        if missing:
+            raise RuntimeError(f"Live top-of-book fields missing: {', '.join(missing)}")
+        return {
+            "bid_price": bid_price,
+            "ask_price": ask_price,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+            "observed_at": datetime.now(tz=ZoneInfo(self._settings.market_timezone if self._settings else "Asia/Kolkata")),
+            "source": source,
+        }
 
     def get_option_chain(self, symbol: str, *, depth: int | None = None) -> OptionChainSnapshot:
         """
@@ -336,6 +417,8 @@ class DhanService:
         atm_strike = int(round(min(all_strikes, key=lambda strike: abs(strike - spot_price))))
 
         chain_depth = depth if depth is not None else self._dhan.option_chain_depth
+        if normalize_market_symbol(target) in {"NIFTY 50", "SENSEX"}:
+            chain_depth = max(4, int(chain_depth))
         selected_strikes = _DhanClient._slice_strikes_around_atm(all_strikes, atm_strike, chain_depth)
         selected_set = set(selected_strikes)
 
@@ -797,6 +880,8 @@ class DhanService:
         from .dhan_client import DhanClient as _DhanClient
 
         chain_depth = depth if depth is not None else self._dhan.option_chain_depth
+        if normalize_market_symbol(target) in {"NIFTY 50", "SENSEX"}:
+            chain_depth = max(4, int(chain_depth))
         selected_strikes = _DhanClient._slice_strikes_around_atm(all_strikes, atm_strike, chain_depth)
         selected_set = set(selected_strikes)
         filtered_contracts = tuple(
@@ -1544,6 +1629,8 @@ class DhanService:
             ask_price=self._optional_float(payload.get("offer_price") or payload.get("ask_price") or ask_row.get("price")),
             bid_qty=self._optional_float(payload.get("bid_quantity") or bid_row.get("quantity")),
             ask_qty=self._optional_float(payload.get("offer_quantity") or payload.get("ask_quantity") or ask_row.get("quantity")),
+            vega=self._optional_float(greeks.get("vega") or payload.get("vega")),
+            gamma=self._optional_float(greeks.get("gamma") or payload.get("gamma")),
         )
 
     @staticmethod

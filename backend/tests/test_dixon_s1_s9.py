@@ -16,7 +16,7 @@ from app.services.indicator_engine import SymbolIndicatorState
 from app.utils.indicators import IndicatorPoint
 
 
-def _point(*, close, rsi, macd, macd_signal):
+def _point(*, close, rsi, macd, macd_signal, ema9=100.0):
     return IndicatorPoint(
         candle_time=datetime(2026, 5, 1, 9, 20, 0),
         open=float(close),
@@ -29,6 +29,7 @@ def _point(*, close, rsi, macd, macd_signal):
         macd=None if macd is None else float(macd),
         macd_signal=None if macd_signal is None else float(macd_signal),
         macd_histogram=None,
+        ema9=None if ema9 is None else float(ema9),
         mcginley=float(close),
         sma=None,
         bias="neutral",
@@ -44,6 +45,7 @@ class TestDixonS1S9(unittest.TestCase):
     def setUp(self) -> None:
         settings = Settings(
             database_url="sqlite:///./test.db",
+            underlying_symbol="DIXON",
             nifty_index_symbol="DIXON",
             nifty_symbols=("DIXON",),
         )
@@ -51,9 +53,9 @@ class TestDixonS1S9(unittest.TestCase):
 
     def test_s9_uses_dixon_s1_signal_for_direction(self) -> None:
         states = {
-            "5m": {"DIXON": _state("5m", _point(close=100, rsi=40, macd=0, macd_signal=0), _point(close=102, rsi=56, macd=1, macd_signal=0.2))},
-            "10m": {"DIXON": _state("10m", _point(close=100, rsi=40, macd=0, macd_signal=0), _point(close=102, rsi=56, macd=1, macd_signal=0.2))},
+            "3m": {"DIXON": _state("3m", _point(close=100, rsi=40, macd=0, macd_signal=0), _point(close=102, rsi=56, macd=1, macd_signal=0.2))},
             "15m": {"DIXON": _state("15m", _point(close=100, rsi=40, macd=0, macd_signal=0), _point(close=102, rsi=56, macd=1, macd_signal=0.2))},
+            "60m": {"DIXON": _state("60m", _point(close=100, rsi=40, macd=0, macd_signal=0), _point(close=102, rsi=56, macd=1, macd_signal=0.2))},
         }
         s1_signals = [
             ScreenerSignal(screener="S1", symbol="DIXON", signal="strong_buy", confidence=0.95, reason="", payload={}),
@@ -71,14 +73,14 @@ class TestDixonS1S9(unittest.TestCase):
         self.assertEqual(payload["underlying_symbol"], "DIXON")
         self.assertEqual(payload["effective_direction"], "bullish")
         self.assertEqual(payload["effective_signal"], "strong_buy")
-        self.assertEqual(payload["direction_source"], "auto")
+        self.assertEqual(payload["direction_source"], "s9_state")
         self.assertEqual(payload["rejection_reason"], "OPTION_CHAIN_UNAVAILABLE")
 
     def test_s9_uses_neutral_when_dixon_s1_is_neutral(self) -> None:
         states = {
-            "5m": {"DIXON": _state("5m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0))},
-            "10m": {"DIXON": _state("10m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0))},
-            "15m": {"DIXON": _state("15m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0))},
+            "3m": {"DIXON": _state("3m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0))},
+            "15m": {"DIXON": _state("15m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0, ema9=101))},
+            "60m": {"DIXON": _state("60m", _point(close=100, rsi=50, macd=0, macd_signal=0), _point(close=101, rsi=50, macd=0, macd_signal=0, ema9=101))},
         }
         s1_signals = [
             ScreenerSignal(screener="S1", symbol="DIXON", signal="watch", confidence=0.3, reason="", payload={}),
@@ -96,7 +98,7 @@ class TestDixonS1S9(unittest.TestCase):
         self.assertEqual(payload["underlying_symbol"], "DIXON")
         self.assertEqual(payload["effective_direction"], "neutral")
         self.assertEqual(payload["effective_signal"], "neutral")
-        self.assertEqual(payload["rejection_reason"], "DIXON_S1_NEUTRAL")
+        self.assertEqual(payload["rejection_reason"], "DIXON_NEUTRAL")
 
 
 if __name__ == "__main__":

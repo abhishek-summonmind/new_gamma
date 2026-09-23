@@ -51,6 +51,7 @@ class IndicatorEngine:
         target_symbol = (self._settings.underlying_symbol or self._settings.nifty_index_symbol).strip().upper()
         for timeframe in self._settings.timeframes:
             bucket: dict[str, SymbolIndicatorState] = {}
+            completed_trend_bucket: dict[str, SymbolIndicatorState] = {}
 
             for symbol, raw_frame in frames_by_symbol.items():
                 if str(symbol).strip().upper() != target_symbol:
@@ -103,6 +104,16 @@ class IndicatorEngine:
                 )
                 bucket[symbol] = state
 
+                if timeframe in {"15m", "60m"}:
+                    completed_state = self._completed_s9_trend_state(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        raw_frame=raw_frame,
+                        now_market=now_market,
+                    )
+                    if completed_state is not None:
+                        completed_trend_bucket[symbol] = completed_state
+
                 # logger.info(
                 #     "INDICATOR %s %s | RSI=%s MACD=%s MACD_SIGNAL=%s McGinley=%s Close=%s",
                 #     symbol,
@@ -123,10 +134,43 @@ class IndicatorEngine:
                 )
 
             result.states_by_timeframe[timeframe] = bucket
+            if timeframe in {"15m", "60m"}:
+                result.states_by_timeframe[f"s9_{timeframe}_completed"] = completed_trend_bucket
             if timeframe == primary_timeframe:
                 result.states_by_symbol = bucket
 
         return result
+
+    def _completed_s9_trend_state(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        raw_frame: pd.DataFrame,
+        now_market: datetime | None,
+    ) -> SymbolIndicatorState | None:
+        completed = resample_ohlcv(
+            raw_frame,
+            timeframe=timeframe,
+            timezone_name=self._settings.market_timezone,
+            market_open_time=self._settings.market_open_time,
+            market_close_time=self._settings.market_close_time,
+            now_market=now_market,
+            completed_only=True,
+        )
+        lookback = take_lookback(completed, candles=self._settings.lookback_candles)
+        if lookback.empty:
+            return None
+        indicator_frame = build_indicator_frame(lookback)
+        latest = latest_indicator_point(indicator_frame)
+        if latest is None:
+            return None
+        return SymbolIndicatorState(
+            symbol=symbol,
+            timeframe=timeframe,
+            latest=latest,
+            previous=previous_indicator_point(indicator_frame),
+        )
 
     def _upsert_indicator_snapshot(
         self,

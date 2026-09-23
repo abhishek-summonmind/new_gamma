@@ -243,40 +243,18 @@ class AutoTradeService:
 
         now_naive = self._naive(now_market)
         ltp = float(contract.ltp)
+        exit_reason = self.manage_open_trade_ltp(
+            trade=trade,
+            ltp=ltp,
+            now_market=now_market,
+            summary=summary,
+        )
+        if exit_reason is not None:
+            return
+
         average = float(trade.average_entry_price or trade.initial_average_price or 0.0)
         initial = float(trade.initial_average_price or average)
-        quantity = int(trade.open_quantity or 0)
-        trade.current_ltp = ltp
-        trade.last_broker_reconciled_at = now_naive
-        trade.updated_at = now_naive
-        if average > 0:
-            trade.unrealized_pnl = round((ltp - average) * quantity, 2)
-            trade.unrealized_pnl_pct = round(((ltp - average) / average) * 100.0, 2)
-
-        hard_stop = float(trade.hard_stop_price or self._hard_stop(initial, float(trade.tick_size or 0.05)))
-        trade.hard_stop_price = hard_stop
         initial_gain_pct = ((ltp - initial) / initial) * 100.0 if initial > 0 else 0.0
-        average_gain_pct = ((ltp - average) / average) * 100.0 if average > 0 else initial_gain_pct
-
-        if average_gain_pct >= self.TRAILING_TRIGGER_PCT:
-            trade.trailing_active = True
-            trade.max_high = max(float(trade.max_high or 0.0), ltp)
-        if bool(trade.trailing_active):
-            trade.max_high = max(float(trade.max_high or 0.0), ltp)
-
-        if average_gain_pct >= self.BREAKEVEN_TRIGGER_PCT and average > 0 and not bool(trade.breakeven_active):
-            trade.breakeven_active = True
-            trade.hard_stop_price = self._round_tick(average, float(trade.tick_size or 0.05))
-            hard_stop = float(trade.hard_stop_price)
-            if trade.dry_run:
-                trade.sl_order_status = "DRY_RUN_BREAKEVEN"
-            else:
-                self._ensure_live_stop(trade=trade)
-
-        exit_reason = self._tick_exit_reason(trade=trade, ltp=ltp, hard_stop=hard_stop)
-        if exit_reason is not None:
-            self._exit_on_tick(trade=trade, ltp=ltp, reason=exit_reason, now_market=now_market, summary=summary)
-            return
 
         candle_is_new = self._advance_hold_count(trade=trade, state=state)
         ema9 = self._ema9(state)
@@ -343,6 +321,51 @@ class AutoTradeService:
             trade.sl_quantity = new_quantity
             summary["adds"] += 1
             summary["events"].append({"type": "add_lot", "symbol": trade.symbol, "price": ltp})
+
+    def manage_open_trade_ltp(
+        self,
+        *,
+        trade: AutoTrade,
+        ltp: float,
+        now_market: datetime,
+        summary: dict[str, Any],
+    ) -> str | None:
+        now_naive = self._naive(now_market)
+        average = float(trade.average_entry_price or trade.initial_average_price or 0.0)
+        initial = float(trade.initial_average_price or average)
+        quantity = int(trade.open_quantity or 0)
+        trade.current_ltp = ltp
+        trade.last_broker_reconciled_at = now_naive
+        trade.updated_at = now_naive
+        if average > 0:
+            trade.unrealized_pnl = round((ltp - average) * quantity, 2)
+            trade.unrealized_pnl_pct = round(((ltp - average) / average) * 100.0, 2)
+
+        hard_stop = float(trade.hard_stop_price or self._hard_stop(initial, float(trade.tick_size or 0.05)))
+        trade.hard_stop_price = hard_stop
+        initial_gain_pct = ((ltp - initial) / initial) * 100.0 if initial > 0 else 0.0
+        average_gain_pct = ((ltp - average) / average) * 100.0 if average > 0 else initial_gain_pct
+
+        if average_gain_pct >= self.TRAILING_TRIGGER_PCT:
+            trade.trailing_active = True
+            trade.max_high = max(float(trade.max_high or 0.0), ltp)
+        if bool(trade.trailing_active):
+            trade.max_high = max(float(trade.max_high or 0.0), ltp)
+
+        if average_gain_pct >= self.BREAKEVEN_TRIGGER_PCT and average > 0 and not bool(trade.breakeven_active):
+            trade.breakeven_active = True
+            trade.hard_stop_price = self._round_tick(average, float(trade.tick_size or 0.05))
+            hard_stop = float(trade.hard_stop_price)
+            if trade.dry_run:
+                trade.sl_order_status = "DRY_RUN_BREAKEVEN"
+            else:
+                self._ensure_live_stop(trade=trade)
+
+        exit_reason = self._tick_exit_reason(trade=trade, ltp=ltp, hard_stop=hard_stop)
+        if exit_reason is not None:
+            self._exit_on_tick(trade=trade, ltp=ltp, reason=exit_reason, now_market=now_market, summary=summary)
+            return exit_reason
+        return None
 
     def _entry_candidate(self, *, signals: list[ScreenerSignal], symbol: str) -> ScreenerSignal | None:
         threshold = self._minimum_score(symbol)
@@ -961,6 +984,7 @@ class AutoTradeService:
             select(AutoTrade)
             .where(AutoTrade.symbol == symbol)
             .order_by(AutoTrade.created_at.desc(), AutoTrade.id.desc())
+            .with_for_update()
         )
         return next((trade for trade in rows if self.is_active_trade(trade, now_market=now_market)), None)
 

@@ -18,7 +18,10 @@ from app.services.screener_engine import ScreenerEngine, ScreenerSignal  # noqa:
 from app.utils.indicators import IndicatorPoint  # noqa: E402
 
 
-def _point(*, close, mcginley, rsi, macd, macd_signal):
+_EMA9_FROM_MCGINLEY = object()
+
+
+def _point(*, close, mcginley, rsi, macd, macd_signal, ema9=_EMA9_FROM_MCGINLEY):
     return IndicatorPoint(
         candle_time=datetime(2026, 5, 1, 9, 20, 0),
         open=float(close),
@@ -31,6 +34,11 @@ def _point(*, close, mcginley, rsi, macd, macd_signal):
         macd=None if macd is None else float(macd),
         macd_signal=None if macd_signal is None else float(macd_signal),
         macd_histogram=None,
+        ema9=(
+            None
+            if ema9 is None
+            else float(mcginley if ema9 is _EMA9_FROM_MCGINLEY else ema9)
+        ),
         mcginley=None if mcginley is None else float(mcginley),
         sma=None,
         bias="neutral",
@@ -74,7 +82,16 @@ def _option_chain_many(contracts: tuple[OptionContract, ...], atm: int = 56000) 
     )
 
 
-def _contract(strike: float, option_type: str, *, oi: float = 1000.0, delta=None, theta=-15.0) -> OptionContract:
+def _contract(
+    strike: float,
+    option_type: str,
+    *,
+    oi: float = 1000.0,
+    delta=None,
+    theta=-15.0,
+    bid_qty: float = 700.0,
+    ask_qty: float = 300.0,
+) -> OptionContract:
     return OptionContract(
         security_id=f"{int(strike)}{option_type}",
         strike=strike,
@@ -85,8 +102,8 @@ def _contract(strike: float, option_type: str, *, oi: float = 1000.0, delta=None
         volume=500.0,
         delta=delta,
         theta=theta,
-        bid_qty=700.0,
-        ask_qty=300.0,
+        bid_qty=bid_qty,
+        ask_qty=ask_qty,
     )
 
 
@@ -207,58 +224,82 @@ class TestS9Screener(unittest.TestCase):
         )
 
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].signal, "BUY_CALL")
-        self.assertEqual(rows[0].payload["underlying_direction"], "bullish")
-        self.assertEqual(rows[0].payload["underlying_signal"], "buy")
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["underlying_direction"], "neutral")
+        self.assertEqual(rows[0].payload["underlying_signal"], "neutral")
         self.assertEqual(rows[0].payload["direction_source"], "s9_state")
 
     def _bullish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
         prev = _point(close=99, mcginley=100, rsi=54, macd=0, macd_signal=0)
         curr = _point(close=101, mcginley=100, rsi=56, macd=2, macd_signal=1)
         return {
-            "5m": {"BANK NIFTY": _state("5m", prev, curr)},
-            "10m": {"BANK NIFTY": _state("10m", prev, curr)},
+            "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
+            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
         }
 
     def _neutral_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
         prev = _point(close=101, mcginley=100, rsi=55, macd=2, macd_signal=1)
-        curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1)
+        curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1, ema9=102)
         return {
-            "5m": {"BANK NIFTY": _state("5m", prev, curr)},
-            "10m": {"BANK NIFTY": _state("10m", prev, curr)},
+            "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
+            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
         }
 
     def _bearish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
         prev = _point(close=102, mcginley=100, rsi=46, macd=0, macd_signal=1)
         curr = _point(close=98, mcginley=100, rsi=44, macd=-2, macd_signal=0)
         return {
-            "5m": {"BANK NIFTY": _state("5m", prev, curr)},
-            "10m": {"BANK NIFTY": _state("10m", prev, curr)},
+            "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
+            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
         }
 
     def _weak_bullish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
         bullish_prev = _point(close=99, mcginley=100, rsi=54, macd=0, macd_signal=0)
         bullish_curr = _point(close=101, mcginley=100, rsi=56, macd=2, macd_signal=1)
         neutral_prev = _point(close=101, mcginley=100, rsi=55, macd=2, macd_signal=1)
-        neutral_curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1)
+        neutral_curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1, ema9=102)
         return {
-            "5m": {"BANK NIFTY": _state("5m", bullish_prev, bullish_curr)},
-            "10m": {"BANK NIFTY": _state("10m", neutral_prev, neutral_curr)},
+            "3m": {"BANK NIFTY": _state("3m", bullish_prev, bullish_curr)},
             "15m": {"BANK NIFTY": _state("15m", neutral_prev, neutral_curr)},
+            "60m": {"BANK NIFTY": _state("60m", neutral_prev, neutral_curr)},
         }
 
     def _weak_bearish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
         bearish_prev = _point(close=102, mcginley=100, rsi=46, macd=0, macd_signal=1)
         bearish_curr = _point(close=98, mcginley=100, rsi=44, macd=-2, macd_signal=0)
         neutral_prev = _point(close=101, mcginley=100, rsi=55, macd=2, macd_signal=1)
-        neutral_curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1)
+        neutral_curr = _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1, ema9=102)
         return {
-            "5m": {"BANK NIFTY": _state("5m", bearish_prev, bearish_curr)},
-            "10m": {"BANK NIFTY": _state("10m", neutral_prev, neutral_curr)},
+            "3m": {"BANK NIFTY": _state("3m", bearish_prev, bearish_curr)},
             "15m": {"BANK NIFTY": _state("15m", neutral_prev, neutral_curr)},
+            "60m": {"BANK NIFTY": _state("60m", neutral_prev, neutral_curr)},
+        }
+
+    def _mixed_index_states(self, *, hour: str, fifteen: str) -> dict[str, dict[str, SymbolIndicatorState]]:
+        points = {
+            "bullish": (
+                _point(close=99, mcginley=100, rsi=54, macd=0, macd_signal=0),
+                _point(close=101, mcginley=100, rsi=56, macd=2, macd_signal=1),
+            ),
+            "bearish": (
+                _point(close=102, mcginley=100, rsi=46, macd=0, macd_signal=1),
+                _point(close=98, mcginley=100, rsi=44, macd=-2, macd_signal=0),
+            ),
+            "neutral": (
+                _point(close=101, mcginley=100, rsi=55, macd=2, macd_signal=1),
+                _point(close=102, mcginley=100, rsi=55, macd=2, macd_signal=1, ema9=102),
+            ),
+        }
+        three_prev, three_curr = points["bullish"]
+        hour_prev, hour_curr = points[hour]
+        fifteen_prev, fifteen_curr = points[fifteen]
+        return {
+            "3m": {"BANK NIFTY": _state("3m", three_prev, three_curr)},
+            "15m": {"BANK NIFTY": _state("15m", fifteen_prev, fifteen_curr)},
+            "60m": {"BANK NIFTY": _state("60m", hour_prev, hour_curr)},
         }
 
     def _conflicting_s1_signals(self) -> list[ScreenerSignal]:
@@ -313,12 +354,11 @@ class TestS9Screener(unittest.TestCase):
         rows = self._run_success(self._weak_bullish_index_states(), "CE")
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row.signal, "BUY_CALL")
-        self.assertEqual(row.payload["bank_nifty_direction"], "bullish")
-        self.assertEqual(row.payload["bank_nifty_signal"], "buy")
-        self.assertEqual(row.payload["option_type"], "CE")
-        self.assertEqual(row.payload["signal"], "buy_call")
-        self.assertTrue(row.payload["confirmed"])
+        self.assertEqual(row.signal, "neutral")
+        self.assertEqual(row.payload["bank_nifty_direction"], "neutral")
+        self.assertEqual(row.payload["bank_nifty_signal"], "neutral")
+        self.assertEqual(row.payload["option_type"], None)
+        self.assertFalse(row.payload["confirmed"])
 
     def test_s9_strong_buy_call_from_bank_nifty_strong_buy(self) -> None:
         rows = self._run_success(
@@ -328,13 +368,13 @@ class TestS9Screener(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row.signal, "STRONG_BUY_CALL")
+        self.assertEqual(row.signal, "BUY_CALL")
         self.assertEqual(row.payload["bank_nifty_direction"], "bullish")
         self.assertEqual(row.payload["bank_nifty_signal"], "strong_buy")
         self.assertEqual(row.payload["option_type"], "CE")
         self.assertEqual(row.payload["strike"], 58000)
         self.assertEqual(row.payload["option_symbol"], "BANK NIFTY 58000 CE")
-        self.assertEqual(row.payload["signal"], "strong_buy_call")
+        self.assertEqual(row.payload["signal"], "buy_call")
         self.assertEqual(row.payload["signal_time"], "2026-05-01T09:30:00")
         self.assertTrue(row.payload["confirmed"])
         self.assertEqual(
@@ -347,38 +387,30 @@ class TestS9Screener(unittest.TestCase):
         rows = self._run_success(self._weak_bearish_index_states(), "PE")
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row.signal, "BUY_PUT")
-        self.assertEqual(row.payload["bank_nifty_direction"], "bearish")
-        self.assertEqual(row.payload["bank_nifty_signal"], "sell")
-        self.assertEqual(row.payload["option_type"], "PE")
-        self.assertEqual(row.payload["signal"], "buy_put")
+        self.assertEqual(row.signal, "neutral")
+        self.assertEqual(row.payload["bank_nifty_direction"], "neutral")
+        self.assertEqual(row.payload["bank_nifty_signal"], "neutral")
+        self.assertEqual(row.payload["option_type"], None)
 
     def test_s9_bearish_strong_buy_put_from_bank_nifty_strong_sell(self) -> None:
         rows = self._run_success(self._bearish_index_states(), "PE")
         self.assertEqual(len(rows), 1)
         row = rows[0]
-        self.assertEqual(row.signal, "STRONG_BUY_PUT")
+        self.assertEqual(row.signal, "BUY_PUT")
         self.assertEqual(row.payload["bank_nifty_direction"], "bearish")
         self.assertEqual(row.payload["bank_nifty_signal"], "strong_sell")
         self.assertEqual(row.payload["option_type"], "PE")
-        self.assertEqual(row.payload["signal"], "strong_buy_put")
+        self.assertEqual(row.payload["signal"], "buy_put")
 
-    def test_s9_direction_uses_rsi_only_without_mcginley(self) -> None:
-        prev = _point(close=100, mcginley=200, rsi=50, macd=0, macd_signal=0)
-        bullish_curr = _point(close=90, mcginley=200, rsi=56, macd=-2, macd_signal=1)
-        bearish_curr = _point(close=210, mcginley=100, rsi=44, macd=2, macd_signal=1)
-        neutral_curr = _point(close=210, mcginley=100, rsi=50, macd=2, macd_signal=1)
+    def test_s9_direction_uses_ema9_and_ignores_rsi_macd(self) -> None:
+        prev = _point(close=100, mcginley=100, rsi=50, macd=0, macd_signal=0)
+        bullish_curr = _point(close=101, mcginley=100, rsi=10, macd=-2, macd_signal=1, ema9=100)
+        bearish_curr = _point(close=99, mcginley=100, rsi=90, macd=2, macd_signal=-1, ema9=100)
+        neutral_curr = _point(close=100, mcginley=100, rsi=90, macd=2, macd_signal=-1, ema9=100)
 
-        bullish, bullish_detail = self.engine._s9_rsi_direction(_state("5m", prev, bullish_curr))
-        bearish, bearish_detail = self.engine._s9_rsi_direction(_state("5m", prev, bearish_curr))
-        neutral, neutral_detail = self.engine._s9_rsi_direction(_state("5m", prev, neutral_curr))
-
-        self.assertEqual(bullish, "bullish")
-        self.assertEqual(bearish, "bearish")
-        self.assertEqual(neutral, "neutral")
-        self.assertFalse(bullish_detail["mcginley_used"])
-        self.assertFalse(bearish_detail["mcginley_used"])
-        self.assertFalse(neutral_detail["mcginley_used"])
+        self.assertEqual(self.engine._s9_ema9_direction(_state("60m", prev, bullish_curr)), "bullish")
+        self.assertEqual(self.engine._s9_ema9_direction(_state("60m", prev, bearish_curr)), "bearish")
+        self.assertEqual(self.engine._s9_ema9_direction(_state("60m", prev, neutral_curr)), "neutral")
 
     def test_s9_option_chain_unavailable_returns_single_row(self) -> None:
         rows = self.engine._run_s9(
@@ -399,7 +431,7 @@ class TestS9Screener(unittest.TestCase):
     def test_s9_works_with_empty_s1_signals(self) -> None:
         rows = self._run_success(self._bullish_index_states(), "CE", s1_signals=[])
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].signal, "STRONG_BUY_CALL")
+        self.assertEqual(rows[0].signal, "BUY_CALL")
 
     def test_s9_manual_bullish_evaluates_ce_and_blocks_execution(self) -> None:
         engine = self.engine
@@ -412,11 +444,11 @@ class TestS9Screener(unittest.TestCase):
             override={"mode": "manual", "manual_direction": "bullish", "expires_at": "2026-05-01T10:00:00"},
         )
         row = rows[0]
-        self.assertEqual(row.signal, "BUY_CALL")
-        self.assertEqual(row.payload["direction_source"], "manual")
-        self.assertEqual(row.payload["effective_direction"], "bullish")
-        self.assertEqual(row.payload["option_type"], "CE")
-        self.assertTrue(row.payload["is_manual_override"])
+        self.assertEqual(row.signal, "neutral")
+        self.assertEqual(row.payload["direction_source"], "s9_state")
+        self.assertEqual(row.payload["effective_direction"], "neutral")
+        self.assertEqual(row.payload["option_type"], None)
+        self.assertFalse(row.payload["is_manual_override"])
         self.assertFalse(row.payload["execution_allowed"])
 
     def test_s9_manual_bullish_selects_ce_contract_even_when_sweep_fails(self) -> None:
@@ -428,18 +460,11 @@ class TestS9Screener(unittest.TestCase):
             override={"mode": "manual", "manual_direction": "bullish"},
         )
         row = rows[0]
-        self.assertEqual(row.payload["effective_direction"], "bullish")
-        self.assertEqual(row.payload["option_type"], "CE")
+        self.assertEqual(row.payload["effective_direction"], "neutral")
+        self.assertEqual(row.payload["option_type"], None)
         self.assertIsNone(row.payload["strike"])
         self.assertIsNone(row.payload["option_symbol"])
-        self.assertIsNone(row.payload["selected_strike"])
-        self.assertEqual(row.payload["rejection_reason"], "NO_STRIKE_PASSED_ALL_FILTERS")
-        self.assertEqual(row.payload["scanned_contract_evaluations"][0]["strike"], 58000)
-        self.assertIn("sweep", row.payload["scanned_contract_evaluations"][0]["filters"])
-        self.assertEqual(
-            set(row.payload["scanned_contract_evaluations"][0]["filters"]),
-            {"sweep", "delta", "theta", "pcr", "pcr_shift", "vwap", "order_book"},
-        )
+        self.assertEqual(row.payload["rejection_reason"], "BANK_NIFTY_NEUTRAL")
 
     def test_s9_manual_bearish_evaluates_pe_and_blocks_execution(self) -> None:
         engine = self.engine
@@ -452,10 +477,10 @@ class TestS9Screener(unittest.TestCase):
             override={"mode": "manual", "manual_direction": "bearish"},
         )
         row = rows[0]
-        self.assertEqual(row.signal, "BUY_PUT")
-        self.assertEqual(row.payload["direction_source"], "manual")
-        self.assertEqual(row.payload["effective_direction"], "bearish")
-        self.assertEqual(row.payload["option_type"], "PE")
+        self.assertEqual(row.signal, "neutral")
+        self.assertEqual(row.payload["direction_source"], "s9_state")
+        self.assertEqual(row.payload["effective_direction"], "neutral")
+        self.assertEqual(row.payload["option_type"], None)
         self.assertFalse(row.payload["execution_allowed"])
 
     def test_s9_dynamic_scan_payload_exposes_every_scanned_strike(self) -> None:
@@ -549,6 +574,15 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["rejection_reason"], "NO_VALID_OPTION_CONTRACT")
         self.assertTrue(rows[0].payload["signal_only"])
         self.assertFalse(rows[0].payload["execution_allowed"])
+
+    def test_order_book_threshold_caps_at_58_percent(self) -> None:
+        contract = _contract(56000, "CE", bid_qty=580.0, ask_qty=420.0)
+        self.assertTrue(self.engine._check_order_book_buy(_option_chain("CE", 56000.0), contract)["passed"])
+        self.assertFalse(self.engine._check_order_book_buy(_option_chain("CE", 56000.0), _contract(56000, "CE", bid_qty=590.0, ask_qty=410.0))["passed"])
+
+        put_contract = _contract(56000, "PE", bid_qty=420.0, ask_qty=580.0)
+        self.assertTrue(self.engine._check_order_book_sell(_option_chain("PE", 56000.0), put_contract)["passed"])
+        self.assertFalse(self.engine._check_order_book_sell(_option_chain("PE", 56000.0), _contract(56000, "PE", bid_qty=410.0, ask_qty=590.0))["passed"])
 
     def test_s9_filter_rejection_paths(self) -> None:
         cases = [
@@ -819,6 +853,185 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["selected_option_type"], "PE")
         self.assertTrue(scanned)
         self.assertTrue(all(symbol.endswith(" PE") for symbol in scanned))
+
+    def test_s9_1h_bullish_15m_bullish_scans_ce_only(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._mixed_index_states(hour="bullish", fifteen="bullish"),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].payload["effective_direction"], "bullish")
+        self.assertEqual(scanned_sides, ["CE"])
+
+    def test_nifty_50_bypasses_trend_gate_and_scans_ce_and_pe(self) -> None:
+        settings = Settings(
+            database_url="sqlite:///./test.db",
+            underlying_symbol="NIFTY 50",
+            nifty_index_symbol="NIFTY 50",
+        )
+        engine = ScreenerEngine(settings)
+        scanned_sides: list[str] = []
+        engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = engine._run_s9(
+            states_by_timeframe={},
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(scanned_sides, ["CE", "PE"])
+        self.assertEqual(rows[0].payload["direction_source"], "direct_option_chain")
+        self.assertEqual(rows[0].payload["effective_direction"], "both")
+        self.assertNotEqual(rows[0].payload["rejection_reason"], "NIFTY_50_NEUTRAL")
+
+    def test_sensex_bypasses_trend_gate_and_scans_ce_and_pe(self) -> None:
+        settings = Settings(
+            database_url="sqlite:///./test.db",
+            underlying_symbol="SENSEX",
+            nifty_index_symbol="SENSEX",
+        )
+        engine = ScreenerEngine(settings)
+        scanned_sides: list[str] = []
+        engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = engine._run_s9(
+            states_by_timeframe={},
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(scanned_sides, ["CE", "PE"])
+        self.assertEqual(rows[0].payload["direction_source"], "direct_option_chain")
+        self.assertEqual(rows[0].payload["effective_direction"], "both")
+        self.assertNotEqual(rows[0].payload["rejection_reason"], "SENSEX_NEUTRAL")
+
+    def test_s9_1h_bearish_15m_bearish_scans_pe_only(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._mixed_index_states(hour="bearish", fifteen="bearish"),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].payload["effective_direction"], "bearish")
+        self.assertEqual(scanned_sides, ["PE"])
+
+    def test_s9_1h_bullish_15m_bearish_does_not_scan(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._mixed_index_states(hour="bullish", fifteen="bearish"),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["effective_direction"], "neutral")
+        self.assertEqual(scanned_sides, [])
+
+    def test_s9_1h_bearish_15m_bullish_does_not_scan(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._mixed_index_states(hour="bearish", fifteen="bullish"),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["effective_direction"], "neutral")
+        self.assertEqual(scanned_sides, [])
+
+    def test_s9_1h_or_15m_neutral_does_not_scan(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._mixed_index_states(hour="neutral", fifteen="bullish"),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["effective_direction"], "neutral")
+        self.assertEqual(scanned_sides, [])
+
+    def test_s9_missing_1h_or_15m_does_not_scan(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+        states = self._bullish_index_states()
+        states.pop("60m")
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=states,
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["effective_direction"], "neutral")
+        self.assertEqual(scanned_sides, [])
+
+    def test_s9_missing_ema9_does_not_scan(self) -> None:
+        scanned_sides: list[str] = []
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
+        states = self._bullish_index_states()
+        state_15m = states["15m"]["BANK NIFTY"]
+        missing_ema_point = _point(
+            close=state_15m.latest.close,
+            mcginley=100,
+            rsi=90,
+            macd=10,
+            macd_signal=-10,
+            ema9=None,
+        )
+        states["15m"]["BANK NIFTY"] = _state("15m", state_15m.previous, missing_ema_point)
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=states,
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].signal, "neutral")
+        self.assertEqual(rows[0].payload["effective_direction"], "neutral")
+        self.assertEqual(scanned_sides, [])
+
+    def test_s9_confirmed_direction_uses_existing_3m_filter_state_afterward(self) -> None:
+        seen_timeframes: list[str] = []
+        self.engine._check_index_sweep_buy = lambda state: seen_timeframes.append(state.timeframe) or {
+            "passed": False,
+            "reason": "forced stop",
+            "data": {"timeframe": state.timeframe},
+        }
+        self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: ()
+
+        rows = self.engine._run_s9(
+            states_by_timeframe=self._bullish_index_states(),
+            s1_signals=[],
+            option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
+            now_market=datetime(2026, 5, 1, 9, 30, 0),
+        )
+
+        self.assertEqual(rows[0].payload["effective_direction"], "bullish")
+        self.assertEqual(seen_timeframes, ["3m"])
 
     def test_s9_signal_only_does_not_call_broker_execution_functions(self) -> None:
         engine = self.engine

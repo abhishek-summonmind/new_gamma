@@ -70,14 +70,21 @@ class TestIndexS9Settings(unittest.TestCase):
             ),
         )
         cache = CacheService(self.settings)
-        cache.set_json("pcr:previous", {"pcr": 1.04})
+        cache.set_json("pcr:history", [{"pcr": 0.96}])
         pcr = self.engine._check_pcr_buy(chain)
-        shift = self.engine._check_pcr_shift_buy(chain, None)  # type: ignore[arg-type]
+        call_shift = self.engine._check_pcr_shift_buy(chain, None)  # type: ignore[arg-type]
 
         self.assertTrue(pcr["passed"])
         self.assertTrue(pcr["data"]["ignored"])
-        self.assertTrue(shift["passed"])
-        self.assertGreaterEqual(shift["data"]["pcr_shift"], -0.05)
+        self.assertTrue(call_shift["passed"])
+        self.assertAlmostEqual(call_shift["data"]["pcr_shift"], 0.04)
+        self.assertEqual(call_shift["data"]["timeframe"], "3m")
+
+        cache.set_json("pcr:history", [{"pcr": 1.04}])
+        put_shift = self.engine._check_pcr_shift_sell(chain, None)  # type: ignore[arg-type]
+        self.assertTrue(put_shift["passed"])
+        self.assertAlmostEqual(put_shift["data"]["pcr_shift"], -0.04)
+        self.assertEqual(put_shift["data"]["timeframe"], "3m")
 
     def test_screener_cache_is_symbol_specific(self) -> None:
         self.assertEqual(RefreshService(self.settings)._screener_cache_key("S9"), "dashboard:screener:s9:FINNIFTY")

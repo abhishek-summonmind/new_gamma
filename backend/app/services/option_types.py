@@ -20,6 +20,8 @@ class OptionContract:
     ask_price: float | None = None
     bid_qty: float | None = None
     ask_qty: float | None = None
+    vega: float | None = None
+    gamma: float | None = None
 
 
 @dataclass(frozen=True)

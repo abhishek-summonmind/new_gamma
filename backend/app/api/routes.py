@@ -183,6 +183,56 @@ def screener_s9(
         raise HTTPException(status_code=500, detail=f"Failed to load S9 screener: {exc}") from exc
 
 
+@router.get("/trades/dry-run")
+def dry_run_trades(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
+    """Return the compact, read-only trade history used by the dry-run table."""
+    try:
+        with SessionLocal() as db:
+            rows = list(
+                db.scalars(
+                    select(AutoTrade)
+                    .where(AutoTrade.dry_run.is_(True))
+                    .order_by(AutoTrade.created_at.desc(), AutoTrade.id.desc())
+                    .limit(limit)
+                )
+            )
+        return {
+            "count": len(rows),
+            "items": [_serialize_dry_run_trade(row) for row in rows],
+        }
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to load dry-run trades: {exc}") from exc
+
+
+def _serialize_dry_run_trade(trade: AutoTrade) -> dict[str, Any]:
+    entry_time = trade.entry_filled_at or trade.created_at
+    details = trade.details if isinstance(trade.details, dict) else {}
+    eligibility = details.get("eligibility_snapshot") if isinstance(details.get("eligibility_snapshot"), dict) else {}
+    passed_count = eligibility.get("passed_count")
+    total_filters = eligibility.get("total_filters")
+    entry_pass = (
+        f"{passed_count}/{total_filters}"
+        if passed_count is not None and total_filters is not None
+        else None
+    )
+    return {
+        "id": trade.id,
+        "instrument": trade.symbol,
+        "strike": trade.strike,
+        "type": trade.option_type,
+        "entry_time": entry_time.isoformat() if entry_time else None,
+        "entry_price": trade.average_entry_price,
+        "entry_score": trade.score,
+        "entry_pass": entry_pass,
+        "ltp": trade.current_ltp,
+        "sl": trade.hard_stop_price,
+        "status": trade.status,
+        "exit_time": trade.exit_time.isoformat() if trade.exit_time else None,
+        "exit_price": trade.exit_price,
+        "exit_reason": trade.exit_reason,
+    }
+
+
 def _s9_scan_universe(symbol: str | None = None) -> list[str]:
     return refresh_service._s9_scan_universe(symbol)  # noqa: SLF001
 

@@ -224,14 +224,14 @@ class Settings(BaseModel):
     frontend_no_cache: bool = False
     run_refresh_on_startup: bool = False
 
-    timeframes: Tuple[str, ...] = ("3m", "5m", "10m", "15m", "30m")
+    timeframes: Tuple[str, ...] = ("3m", "5m", "10m", "15m", "30m", "60m")
     active_screeners: Tuple[str, ...] = ("S9",)
     underlying_symbol: str = "NIFTY 50"
     s9_scan_symbols: Tuple[str, ...] = ("NIFTY 50", "SENSEX", "BANK NIFTY", "FINNIFTY")
     lookback_candles: int = 180
     refresh_interval_seconds: int = 60
     s9_top_refresh_interval_seconds: int = 180
-    intraday_fetch_days: int = 5
+    intraday_fetch_days: int = 2
     s9_strike_scan_count: int = 8
     s9_override_refresh_debounce_seconds: float = 2.0
     market_timezone: str = "Asia/Kolkata"
@@ -724,12 +724,12 @@ def get_settings() -> Settings:
         run_refresh_on_startup=str(os.getenv("RUN_REFRESH_ON_STARTUP", "false")).strip().lower()
         in {"1", "true", "yes", "on"},
         timeframes=tuple(
-            row.strip() for row in os.getenv("TIMEFRAMES", "3m,5m,10m,15m,30m").replace(";", ",").split(",") if row.strip()
+            row.strip() for row in os.getenv("TIMEFRAMES", "3m,5m,10m,15m,30m,60m").replace(";", ",").split(",") if row.strip()
         ),
         lookback_candles=_int_env("LOOKBACK_CANDLES", 180),
         refresh_interval_seconds=_int_env("REFRESH_INTERVAL_SECONDS", _int_env("SCAN_INTERVAL_SECONDS", 10)),
         s9_top_refresh_interval_seconds=max(1, _int_env("S9_TOP_REFRESH_INTERVAL_SECONDS", 180)),
-        intraday_fetch_days=_int_env("INTRADAY_FETCH_DAYS", 5),
+        intraday_fetch_days=_int_env("INTRADAY_FETCH_DAYS", 2),
         s9_strike_scan_count=max(1, _int_env("S9_STRIKE_SCAN_COUNT", 8)),
         s9_override_refresh_debounce_seconds=max(
             0.0,

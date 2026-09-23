@@ -25,6 +25,7 @@ class IndicatorPoint:
     macd_signal: float | None
     macd_histogram: float | None
     ema9: float | None = None
+    ema20: float | None = None
     mcginley: float | None = None
     sma: float | None = None
     bias: str = "neutral"
@@ -242,6 +243,7 @@ def build_indicator_frame(frame: pd.DataFrame, *, rsi_frame: pd.DataFrame | None
     macd, macd_signal, macd_histogram = macd_series(close_series, fast=12, slow=26, signal=9)
     mcginley = mcginley_series(close_series, length=14)
     ema9 = close_series.ewm(span=9, adjust=False).mean()
+    ema20 = close_series.ewm(span=20, adjust=False).mean()
     sma = sma_series(close_series, length=14)
     vol_ma = sma_series(volume_series, length=14)
     vol_ma20 = sma_series(volume_series, length=20)
@@ -256,6 +258,7 @@ def build_indicator_frame(frame: pd.DataFrame, *, rsi_frame: pd.DataFrame | None
     result["macd_signal"] = macd_signal
     result["macd_histogram"] = macd_histogram
     result["ema9"] = ema9
+    result["ema20"] = ema20
     result["mcginley"] = mcginley
     result["sma"] = sma
     result["volume_ma"] = vol_ma
@@ -330,6 +333,7 @@ def latest_indicator_point(frame: pd.DataFrame) -> IndicatorPoint | None:
         macd_signal=_safe_float(row.get("macd_signal")),
         macd_histogram=_safe_float(row.get("macd_histogram")),
         ema9=_safe_float(row.get("ema9")),
+        ema20=_safe_float(row.get("ema20")),
         mcginley=_safe_float(row.get("mcginley")),
         sma=_safe_float(row.get("sma")),
         bias=str(row.get("bias", "neutral")).lower(),
