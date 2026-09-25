@@ -1181,6 +1181,12 @@ class DhanService:
             or ""
         )
 
+    def get_groww_access_token(self) -> str:
+        """Return the configured/generated token for the official Groww SDK."""
+        if self._provider != "groww":
+            raise RuntimeError("Groww live feed requires the Groww market-data provider")
+        return self._effective_access_token()
+
     def _generate_groww_access_token(self) -> str:
         api_key = str(self._groww.groww_api_key or "").strip()
         api_secret = str(self._groww.groww_api_secret or "").strip()

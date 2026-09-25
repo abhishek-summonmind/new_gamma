@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 import logging
 import time as time_module
 from dataclasses import dataclass, field, replace
@@ -19,30 +19,40 @@ from .option_types import OptionChainSnapshot, OptionContract
 logger = logging.getLogger(__name__)
 
 S9_FILTER_WEIGHTS = {
-    "sweep": 10,
-    "ema9": 10,
-    "stoch_rsi": 4,
-    "supertrend": 4,
+    "sweep": 20,
+    "ema9": 20,
+    "stoch_rsi": 5,
+    "supertrend": 5,
     "delta": 20,
     "theta": 0,
-    "pcr": 3,
+    "pcr": 5,
     "pcr_shift": 0,
-    "order_book": 30,
-    "vwap": 20,
-    "volume_breakout": 5,
+    "order_book": 12,
+    "vwap": 15,
+    "volume_breakout": 12,
     "oi_change_pct": 0,
 }
 S9_TOTAL_SCORE = sum(S9_FILTER_WEIGHTS.values())
+S9_VOLUME_VALIDATION_START_SECONDS = 90.0
+S9_INDEX_BREADTH_SYMBOLS = ("NIFTY 50", "SENSEX", "BANK NIFTY")
+S9_INDEX_BREADTH_MAX_SCORE = len(S9_INDEX_BREADTH_SYMBOLS)
 S9_TARGET_INDEX_FILTER_WEIGHTS = {
-    "vwap": 15,
-    "order_book": 15,
-    "pcr_shift": 15,
-    "spread": 10,
-    "delta": 15,
-    "theta": 10,
-    "vega_vix": 10,
-    "gamma": 10,
+    "sweep": 10,
+    "macro_trend": 10,
+    "vwap": 10,
+    "order_book": 20,
+    "pcr": 5,
+    "pcr_shift": 5,
+    "delta": 10,
+    "theta": 5,
+    "stoch_rsi": 5,
+    "supertrend": 5,
+    "volume_breakout": 5,
+    "vega_vix": 5,
+    "gamma": 5,
+    "spread": 0,
 }
+S9_TARGET_INDEX_HIDDEN_FILTERS = frozenset({"macro_trend", "theta", "vega_vix", "spread", "pcr_shift"})
 # Conditional macro confirmation: India VIX, Brent, USD/INR, and FII/DII each
 # contribute at most one point after the technical setup is fully confirmed.
 S9_MACRO_CONFLUENCE_BONUS = 4
@@ -364,15 +374,15 @@ class ScreenerEngine:
         }
         filters_required = (
             [
-                "15m Completed Spot Close vs EMA20",
+                "Sweep Trigger",
                 "Premium > VWAP and <= 2.5% extension",
                 "Order Book 55%-58% sustained for 5 seconds",
-                "3m Volume PCR Shift",
-                "Bid-Ask Spread < INR 0.05",
+                "PCR",
                 "Delta",
-                "Normalized Theta",
-                "Vega + India VIX",
                 "Gamma",
+                "Stochastic RSI",
+                "Supertrend",
+                "3m Volume Breakout",
             ]
             if is_nifty_sensex_setup
             else [
@@ -393,9 +403,9 @@ class ScreenerEngine:
             )
         if apply_volume_breakout_filter and not is_nifty_sensex_setup:
             filters_required.append(
-                "3m Volume Breakout: Green/Red + Live Volume >= Avg Volume(20) * 1.5"
+                "3m Option Premium Volume Breakout: Green Candle + Live Volume >= Avg Volume(20) * 1.5"
                 if is_nifty_sensex_setup
-                else "3m Premium Chart: Close > Open + Close > VWAP + after 170s Live Volume > Avg Volume * 2"
+                else "3m Premium Chart: Close > Open + Close > VWAP + after 90s Live Volume > Avg Volume * 2"
             )
         if is_nifty_sensex_setup:
             effective_direction, effective_signal = self._resolve_s9_target_index_macro_direction(
@@ -453,6 +463,9 @@ class ScreenerEngine:
 
         underlying_timeframe = self._s9_underlying_timeframe(index_key)
         index_state = states_by_timeframe.get(underlying_timeframe, {}).get(index_key)
+        self._record_s9_index_breadth_state(index_key, index_state)
+        index_breadth = self._s9_index_breadth_score(effective_direction)
+        s9_meta["index_breadth"] = index_breadth
         rsi_timeframe = self._s9_underlying_rsi_timeframe(index_key)
         rsi_state = states_by_timeframe.get(rsi_timeframe, {}).get(index_key)
         volume_breakout_timeframe = "3m"
@@ -578,15 +591,19 @@ class ScreenerEngine:
             pcr_check = self._check_pcr_buy(option_chain) if direction == "bullish" else self._check_pcr_sell(option_chain)
             raw_market_filters = (
                 {
+                    "sweep": sweep_check,
                     "macro_trend": self._check_target_macro_trend(
                         (states_by_timeframe.get("s9_15m_completed") or {}).get(index_key),
                         direction,
                     ),
+                    "pcr": self._check_target_pcr(option_chain, direction),
                     "pcr_shift": self._check_target_volume_pcr_shift(
                         option_chain,
                         direction,
                         now_market=now_market,
                     ),
+                    "stoch_rsi": self._check_index_stoch_rsi(index_state, direction),
+                    "supertrend": self._check_index_supertrend(index_state, direction),
                 }
                 if is_nifty_sensex_setup
                 else {"sweep": sweep_check, "pcr": pcr_check}
@@ -625,6 +642,7 @@ class ScreenerEngine:
                         supertrend_factor=1.0 if is_nifty_sensex_setup else 1.5,
                         evaluation_time=now_market,
                         macro_context=macro_context,
+                        index_breadth_score=int(index_breadth["points"]),
                     )
                 if is_nifty_sensex_setup and self._target_microstructure_refresh_required(evaluation):
                     live_contract = self._sample_target_microstructure(
@@ -653,8 +671,9 @@ class ScreenerEngine:
                             option_rsi_state=option_rsi_states.get((float(contract.strike), option_type)),
                             apply_supertrend_filter=False,
                             supertrend_factor=1.0,
-                            evaluation_time=None,
+                            evaluation_time=now_market,
                             macro_context=macro_context,
+                            index_breadth_score=int(index_breadth["points"]),
                         )
                 contract_evaluations.append(evaluation)
         delta_missing_count = sum(
@@ -761,10 +780,10 @@ class ScreenerEngine:
                         "signal": None,
                         "signal_time": signal_time,
                         "confirmed": False,
-                        "passed_count": self._s9_passed_count(displayed_filters),
-                        "total_filters": len(self._s9_active_filters(displayed_filters)),
-                        "score": min(100, self._s9_weighted_score(displayed_filters)),
-                        "max_score": 100 if self._s9_max_score(displayed_filters) else 0,
+                        "passed_count": public_best.get("passed_count", 0) if isinstance(public_best, dict) else 0,
+                        "total_filters": public_best.get("total_filters", 0) if isinstance(public_best, dict) else 0,
+                        "score": public_best.get("score", 0) if isinstance(public_best, dict) else 0,
+                        "max_score": public_best.get("max_score", 0) if isinstance(public_best, dict) else 0,
                         "rejection_reason": rejection_reason,
                         "strategy_rules": strategy_rules,
                         "market_filters": market_filters,
@@ -782,6 +801,9 @@ class ScreenerEngine:
         option_symbol = selected_evaluation["option_symbol"]
         selected_contract = selected_evaluation["contract"]
         filters = selected_evaluation["filters"]
+        public_filters = self._public_s9_filters(filters)
+        public_market_filters = self._public_s9_filters(market_filters)
+        public_contract_filters = self._public_s9_filters(selected_evaluation.get("contract_filters", {}))
         raw_checks = {
             name: {"passed": item.get("passed"), "reason": item.get("reason"), "data": item.get("data")}
             for name, item in filters.items()
@@ -804,6 +826,11 @@ class ScreenerEngine:
         first_failed_filter = next((name for name, check in raw_checks.items() if not check.get("passed")), None)
         if first_failed_filter is not None:
             rejection_reason = failure_reasons.get(first_failed_filter, f"{str(first_failed_filter).upper()}_FAILED")
+            public_rejection_reason = (
+                "INTERNAL_FILTER_FAILED"
+                if is_nifty_sensex_setup and first_failed_filter in S9_TARGET_INDEX_HIDDEN_FILTERS
+                else rejection_reason
+            )
             logger.debug(
                 "S9 %s failed for %s: %s",
                 first_failed_filter,
@@ -816,7 +843,7 @@ class ScreenerEngine:
                     symbol=index_key,
                     signal="neutral",
                     confidence=0.0,
-                    reason=rejection_reason,
+                    reason=public_rejection_reason,
                     payload={
                         **s9_meta,
                         **rsi_meta,
@@ -850,12 +877,8 @@ class ScreenerEngine:
                         "scanned_strike_count": scanned_strike_count,
                         "fully_matched_contract_count": sum(1 for item in contract_evaluations if item.get("confirmed")),
                         "selection_reason": selected_evaluation["selection_reason"],
-                        "market_filters": market_filters,
-                        "contract_filters": {
-                            key: filters[key]
-                            for key in ("delta", "theta", "vega_vix", "gamma", "spread", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
-                            if key in filters
-                        },
+                        "market_filters": public_market_filters,
+                        "contract_filters": public_contract_filters,
                         "signal": None,
                         "signal_time": signal_time,
                         "confirmed": False,
@@ -864,17 +887,16 @@ class ScreenerEngine:
                         "total_filters": int(selected_evaluation.get("total_filters") or len(self._s9_active_filters(filters))),
                         "score": int(selected_evaluation.get("score") or 0),
                         "max_score": selected_max_score,
-                        "rejection_reason": rejection_reason,
+                        "rejection_reason": public_rejection_reason,
                         "sweep_detail": raw_checks["sweep"].get("reason"),
                         "delta_detail": raw_checks["delta"].get("reason"),
-                        "theta_detail": raw_checks["theta"].get("reason"),
                         "pcr_detail": raw_checks["pcr"].get("reason"),
                         "vwap_detail": raw_checks["vwap"].get("reason"),
                         "order_book_detail": raw_checks["order_book"].get("reason"),
                         "strategy_rules": strategy_rules,
                         "signal_only": True,
                         "execution_allowed": False,
-                        "filters": filters,
+                        "filters": public_filters,
                     },
                 )
             ]
@@ -919,18 +941,14 @@ class ScreenerEngine:
             "scanned_strike_count": scanned_strike_count,
             "fully_matched_contract_count": sum(1 for item in contract_evaluations if item.get("confirmed")),
             "selection_reason": selected_evaluation["selection_reason"],
-            "market_filters": market_filters,
-            "contract_filters": {
-                key: filters[key]
-                for key in ("delta", "theta", "vega_vix", "gamma", "spread", "supertrend", "vwap", "volume_breakout", "order_book", "oi_change_pct")
-                if key in filters
-            },
+            "market_filters": public_market_filters,
+            "contract_filters": public_contract_filters,
             "signal": final_signal.lower(),
             "signal_time": signal_time,
             "updated_at": signal_time,
             "confirmed": bool(selected_evaluation.get("confirmed")),
-            "failed_filters": list(selected_evaluation.get("failed_filters") or []),
-            "unavailable_filters": list(selected_evaluation.get("unavailable_filters") or []),
+            "failed_filters": [name for name in selected_evaluation.get("failed_filters") or [] if name in public_filters],
+            "unavailable_filters": [name for name in selected_evaluation.get("unavailable_filters") or [] if name in public_filters],
             "passed_count": self._s9_passed_count(filters),
             "total_filters": int(selected_evaluation.get("total_filters") or len(self._s9_active_filters(filters))),
             "score": int(selected_evaluation.get("score") or 0),
@@ -940,7 +958,7 @@ class ScreenerEngine:
             "rejection_reason": None if selected_evaluation.get("confirmed") else "PARTIAL_FILTER_MATCH",
             "strategy_rules": strategy_rules,
             "signal_only": True,
-            "filters": filters,
+            "filters": public_filters,
         }
         logger.info(
             "S9 confirmed option=%s option_type=%s signal=%s",
@@ -1008,26 +1026,26 @@ class ScreenerEngine:
         if not target_symbol:
             return "neutral", "neutral"
 
-        state_1h = (
-            states_by_timeframe.get("s9_60m_completed", states_by_timeframe.get("60m", {})) or {}
+        state_30m = (
+            states_by_timeframe.get("s9_30m_completed", states_by_timeframe.get("30m", {})) or {}
         ).get(target_symbol)
         state_15m = (
             states_by_timeframe.get("s9_15m_completed", states_by_timeframe.get("15m", {})) or {}
         ).get(target_symbol)
-        tf_1h = self._s9_ema9_direction(state_1h)
+        tf_30m = self._s9_ema9_direction(state_30m)
         tf_15m = self._s9_ema9_direction(state_15m)
-        if state_1h is None or state_15m is None:
+        if state_30m is None or state_15m is None:
             logger.info(
                 "S9_TREND_DIRECTION symbol=%s "
-                "60m_candle_time=%s 60m_close=%s 60m_ema9=%s 60m_direction=%s 60m_completed=%s "
+                "30m_candle_time=%s 30m_close=%s 30m_ema9=%s 30m_direction=%s 30m_completed=%s "
                 "15m_candle_time=%s 15m_close=%s 15m_ema9=%s 15m_direction=%s 15m_completed=%s "
                 "final_direction=neutral",
                 target_symbol,
-                state_1h.latest.candle_time.isoformat() if state_1h is not None else None,
-                float(state_1h.latest.close) if state_1h is not None else None,
-                float(state_1h.latest.ema9) if state_1h is not None and state_1h.latest.ema9 is not None else None,
-                tf_1h,
-                str(state_1h is not None).lower(),
+                state_30m.latest.candle_time.isoformat() if state_30m is not None else None,
+                float(state_30m.latest.close) if state_30m is not None else None,
+                float(state_30m.latest.ema9) if state_30m is not None and state_30m.latest.ema9 is not None else None,
+                tf_30m,
+                str(state_30m is not None).lower(),
                 state_15m.latest.candle_time.isoformat() if state_15m is not None else None,
                 float(state_15m.latest.close) if state_15m is not None else None,
                 float(state_15m.latest.ema9) if state_15m is not None and state_15m.latest.ema9 is not None else None,
@@ -1036,23 +1054,23 @@ class ScreenerEngine:
             )
             return "neutral", "neutral"
 
-        if tf_1h == "bullish" and tf_15m == "bullish":
+        if tf_30m == "bullish" and tf_15m == "bullish":
             final_direction, final_signal = "bullish", "strong_buy"
-        elif tf_1h == "bearish" and tf_15m == "bearish":
+        elif tf_30m == "bearish" and tf_15m == "bearish":
             final_direction, final_signal = "bearish", "strong_sell"
         else:
             final_direction, final_signal = "neutral", "neutral"
 
         logger.info(
             "S9_TREND_DIRECTION symbol=%s "
-            "60m_candle_time=%s 60m_close=%s 60m_ema9=%s 60m_direction=%s 60m_completed=true "
+            "30m_candle_time=%s 30m_close=%s 30m_ema9=%s 30m_direction=%s 30m_completed=true "
             "15m_candle_time=%s 15m_close=%s 15m_ema9=%s 15m_direction=%s 15m_completed=true "
             "final_direction=%s",
             target_symbol,
-            state_1h.latest.candle_time.isoformat(),
-            float(state_1h.latest.close),
-            float(state_1h.latest.ema9) if state_1h.latest.ema9 is not None else None,
-            tf_1h,
+            state_30m.latest.candle_time.isoformat(),
+            float(state_30m.latest.close),
+            float(state_30m.latest.ema9) if state_30m.latest.ema9 is not None else None,
+            tf_30m,
             state_15m.latest.candle_time.isoformat(),
             float(state_15m.latest.close),
             float(state_15m.latest.ema9) if state_15m.latest.ema9 is not None else None,
@@ -1075,6 +1093,67 @@ class ScreenerEngine:
         if close < ema9_value:
             return "bearish"
         return "neutral"
+
+    @staticmethod
+    def _s9_index_breadth_cache_key(symbol: str) -> str:
+        normalized = normalize_market_symbol(symbol).replace(" ", "_").lower()
+        return f"s9:index_breadth:3m:{normalized}"
+
+    def _record_s9_index_breadth_state(
+        self,
+        symbol: str,
+        state: SymbolIndicatorState | None,
+    ) -> None:
+        normalized = normalize_market_symbol(symbol)
+        if normalized not in S9_INDEX_BREADTH_SYMBOLS or state is None:
+            return
+        latest = state.latest
+        try:
+            open_price = float(latest.open)
+            close = float(latest.close)
+        except (TypeError, ValueError):
+            return
+        color = "green" if close > open_price else "red" if close < open_price else "neutral"
+        candle_time = getattr(latest, "candle_time", None)
+        self._cache.set_json(
+            self._s9_index_breadth_cache_key(normalized),
+            {
+                "symbol": normalized,
+                "color": color,
+                "open": open_price,
+                "close": close,
+                "candle_time": candle_time.isoformat() if isinstance(candle_time, datetime) else None,
+                "timeframe": "3m",
+            },
+            ttl_seconds=max(900, int(self._settings.redis_ttl_seconds)),
+        )
+
+    def _s9_index_breadth_score(self, direction: str) -> dict[str, Any]:
+        required_color = "green" if direction == "bullish" else "red" if direction == "bearish" else None
+        components: list[dict[str, Any]] = []
+        points = 0
+        for symbol in S9_INDEX_BREADTH_SYMBOLS:
+            cached = self._cache.get_json(self._s9_index_breadth_cache_key(symbol))
+            row = cached if isinstance(cached, dict) else {}
+            color = str(row.get("color") or "unavailable").lower()
+            matched = required_color is not None and color == required_color
+            points += int(matched)
+            components.append(
+                {
+                    "symbol": symbol,
+                    "color": color,
+                    "matched": matched,
+                    "points": int(matched),
+                    "candle_time": row.get("candle_time"),
+                }
+            )
+        return {
+            "direction": direction,
+            "required_color": required_color,
+            "points": points,
+            "max_points": S9_INDEX_BREADTH_MAX_SCORE,
+            "components": components,
+        }
 
     def _resolve_s9_effective_direction(
         self,
@@ -1341,12 +1420,12 @@ class ScreenerEngine:
             ),
             "volume_breakout": (
                 (
-                    "Final 10 seconds only (2:50-3:00): CE green / PE red 3m candle and "
+                    "After 90 seconds (1:30-3:00): selected CE/PE premium green 3m candle and "
                     "Live Volume >= 1.5x 20-period Avg Volume"
                 )
                 if data.get("indicator") == "3m_volume_breakout"
                 else (
-                    "CE/PE: Close > Open, Close > VWAP; after 170s Live 3m Volume > Avg Volume * 2"
+                    "CE/PE: Close > Open, Close > VWAP; after 90s Live 3m Volume > Avg Volume * 2"
                 )
             ),
             "order_book": (
@@ -1546,8 +1625,11 @@ class ScreenerEngine:
         supertrend_factor: float = 1.0,
         evaluation_time: datetime | None = None,
         macro_context: dict[str, Any] | None = None,
+        index_breadth_score: int = 0,
     ) -> dict[str, Any]:
         option_symbol = self._build_option_symbol(underlying, contract.strike, option_type)
+        normalized_underlying = normalize_market_symbol(underlying)
+        uses_index_option_premium_state = normalized_underlying in {"BANK NIFTY", "FINNIFTY"}
         if target_index_setup:
             contract_raw_checks = {
                 "delta": self._check_target_delta_option(option_symbol, option_type, contract),
@@ -1556,6 +1638,11 @@ class ScreenerEngine:
                 "gamma": self._check_target_gamma(contract),
                 "spread": self._check_target_spread(contract),
                 "vwap": self._check_target_vwap_extension(option_symbol, contract, option_state=option_state),
+                "volume_breakout": self._check_3m_volume_breakout(
+                    option_state,
+                    direction,
+                    now_market=evaluation_time,
+                ),
                 "order_book": self._check_target_order_book(
                     contract,
                     direction,
@@ -1582,15 +1669,22 @@ class ScreenerEngine:
                 ),
                 "vwap": (
                     self._check_stock_vwap_trend(underlying_state, direction)
-                    if (stock_setup or normalize_market_symbol(underlying) in {"BANK NIFTY", "FINNIFTY"})
+                    if stock_setup
+                    else self._check_option_premium_vwap_trend(option_state, direction)
+                    if uses_index_option_premium_state
                     else self._check_vwap_option(option_symbol, contract)
                 ),
                 **(
                     {
                         "volume_breakout": self._check_stock_3m_volume_breakout(
-                            volume_breakout_state,
+                            option_state if uses_index_option_premium_state else volume_breakout_state,
                             direction,
                             now_market=evaluation_time,
+                            source=(
+                                "option_premium_3m_indicator_state"
+                                if uses_index_option_premium_state
+                                else "underlying_3m_indicator_state"
+                            ),
                         )
                     }
                     if volume_breakout_setup
@@ -1655,6 +1749,12 @@ class ScreenerEngine:
         passed_count = self._s9_passed_count(filters)
         total_filters = len(self._s9_active_filters(filters))
         raw_score = self._s9_weighted_score(filters)
+        breadth_score_bonus = (
+            min(S9_INDEX_BREADTH_MAX_SCORE, max(0, int(index_breadth_score)))
+            if not target_index_setup
+            else 0
+        )
+        raw_score += breadth_score_bonus
         score_bonus = 0
         # Macro points are eligible only after all existing technical filters pass;
         # they cannot create a signal or override a failed direction filter. USD/INR
@@ -1669,9 +1769,13 @@ class ScreenerEngine:
             score_bonus = min(4, max(0, int(macro_effects["macro_confirmation_score"])))
             raw_score += score_bonus
         macro_effects["macro_score_applied"] = score_bonus
-        raw_max_score = self._s9_max_score(filters) + score_bonus
-        # Base technical filters total 96. Four independent macro confirmations
-        # can supply one point each, so display always uses /100.
+        raw_max_score = (
+            self._s9_max_score(filters)
+            + (S9_INDEX_BREADTH_MAX_SCORE if not target_index_setup else 0)
+            + score_bonus
+        )
+        # Applicable stock/BankNifty/FinNifty technical filters total 93.
+        # Three index-breadth points plus four macro confirmations complete 100.
         weighted_score = min(100, raw_score)
         premium_candle_time = option_rsi_state.latest.candle_time.isoformat() if option_rsi_state is not None else None
         premium_high = round(float(option_rsi_state.latest.high), 2) if option_rsi_state is not None else None
@@ -1729,6 +1833,7 @@ class ScreenerEngine:
             "market_filters": market_filters,
             "contract_filters": contract_filters,
             "macro_effects": macro_effects,
+            "index_breadth_score": breadth_score_bonus,
             "failed_filters": failed_filters,
             "unavailable_filters": unavailable_filters,
             "liquidity": float(contract.oi or 0.0) + float(contract.volume or 0.0),
@@ -1786,7 +1891,22 @@ class ScreenerEngine:
         return {
             name: item
             for name, item in filters.items()
-            if name != "theta" and not bool((item.get("data") or {}).get("ignored"))
+            if not bool((item.get("data") or {}).get("ignored"))
+        }
+
+    @staticmethod
+    def _public_s9_filters(filters: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        target_index_setup = any(
+            bool((item.get("data") or {}).get("target_index_setup"))
+            for item in filters.values()
+            if isinstance(item, dict)
+        )
+        if not target_index_setup:
+            return filters
+        return {
+            name: item
+            for name, item in filters.items()
+            if name not in S9_TARGET_INDEX_HIDDEN_FILTERS
         }
 
     @staticmethod
@@ -1959,6 +2079,9 @@ class ScreenerEngine:
 
     @staticmethod
     def _public_s9_contract_evaluation(evaluation: dict[str, Any]) -> dict[str, Any]:
+        filters = evaluation.get("filters") if isinstance(evaluation.get("filters"), dict) else {}
+        public_filters = ScreenerEngine._public_s9_filters(filters)
+        public_names = set(public_filters)
         return {
             "strike": evaluation.get("strike"),
             "option_type": evaluation.get("option_type"),
@@ -1982,9 +2105,9 @@ class ScreenerEngine:
             "raw_score": evaluation.get("raw_score"),
             "raw_max_score": evaluation.get("raw_max_score"),
             "confirmed": evaluation.get("confirmed"),
-            "filters": evaluation.get("filters"),
-            "failed_filters": evaluation.get("failed_filters"),
-            "unavailable_filters": evaluation.get("unavailable_filters"),
+            "filters": public_filters,
+            "failed_filters": [name for name in evaluation.get("failed_filters") or [] if name in public_names],
+            "unavailable_filters": [name for name in evaluation.get("unavailable_filters") or [] if name in public_names],
         }
 
     def _build_s9_strike_scan(
@@ -2077,9 +2200,11 @@ class ScreenerEngine:
         best_strike: int | float | None,
     ) -> dict[str, Any]:
         contract = evaluation.get("contract")
-        filters = evaluation.get("filters") if isinstance(evaluation.get("filters"), dict) else {}
-        failed = list(evaluation.get("failed_filters") or [])
-        unavailable = list(evaluation.get("unavailable_filters") or [])
+        internal_filters = evaluation.get("filters") if isinstance(evaluation.get("filters"), dict) else {}
+        filters = self._public_s9_filters(internal_filters)
+        target_index_setup = len(filters) != len(internal_filters)
+        failed = [name for name in evaluation.get("failed_filters") or [] if name in filters]
+        unavailable = [name for name in evaluation.get("unavailable_filters") or [] if name in filters]
         first_failed_filter = (failed or unavailable or [None])[0]
         first_failed_payload = filters.get(first_failed_filter) if isinstance(first_failed_filter, str) else None
         strike = evaluation.get("strike")
@@ -2093,7 +2218,11 @@ class ScreenerEngine:
             "is_selected": strike is not None and selected_strike is not None and int(strike) == int(selected_strike),
             "ltp": getattr(contract, "ltp", None),
             "delta": self._filter_metric(filters, "delta", "delta", fallback=getattr(contract, "delta", None)),
-            "theta": self._filter_metric(filters, "theta", "theta", fallback=getattr(contract, "theta", None)),
+            **(
+                {}
+                if target_index_setup
+                else {"theta": self._filter_metric(filters, "theta", "theta", fallback=getattr(contract, "theta", None))}
+            ),
             "pcr": self._filter_metric(filters, "pcr", "pcr"),
             "vwap": self._filter_metric(filters, "vwap", "vwap"),
             "volume_ratio": self._filter_metric(filters, "volume_breakout", "volume_ratio"),
@@ -2321,6 +2450,20 @@ class ScreenerEngine:
         result["reason"] = f"{option_type} setup close {close:.2f} > VWAP {vwap_value:.2f}"
         return result
 
+    def _check_option_premium_vwap_trend(
+        self,
+        state: SymbolIndicatorState | None,
+        direction: str,
+    ) -> dict[str, Any]:
+        """Apply the BankNifty/FinNifty VWAP rule to the selected option premium."""
+        result = self._check_stock_vwap_trend(state, direction)
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        data["indicator"] = "option_premium_vwap"
+        data["source"] = "option_premium_3m_indicator_state"
+        result["data"] = data
+        result["reason"] = str(result.get("reason") or "").replace("Underlying", "Option premium")
+        return result
+
     def _check_5m_volume_breakout(
         self,
         state: SymbolIndicatorState | None,
@@ -2438,6 +2581,7 @@ class ScreenerEngine:
         direction: str,
         *,
         now_market: datetime | None = None,
+        source: str = "underlying_3m_indicator_state",
     ) -> dict[str, Any]:
         """Stock/BankNifty/FinNifty volume rule on 3m without threshold changes."""
         result = {"passed": False, "reason": "", "data": {"indicator": "stock_3m_volume_breakout", "timeframe": "3m"}}
@@ -2464,7 +2608,8 @@ class ScreenerEngine:
             "volume_multiplier": 2.0,
             "required_volume": None if avg_volume is None else float(avg_volume) * 2.0,
             "vwap": None if vwap is None else float(vwap),
-            "volume_validation_start_seconds": 170.0,
+            "volume_validation_start_seconds": S9_VOLUME_VALIDATION_START_SECONDS,
+            "source": source,
         }
         result["data"] = data
 
@@ -2499,7 +2644,7 @@ class ScreenerEngine:
                 elapsed_seconds = max(0.0, (now_local - session_open).total_seconds())
                 candle_elapsed_seconds = elapsed_seconds % 180.0
                 timing_source = "market_clock"
-            volume_validation_ready = candle_elapsed_seconds >= 170.0
+            volume_validation_ready = candle_elapsed_seconds >= S9_VOLUME_VALIDATION_START_SECONDS
             data.update(
                 {
                     "candle_elapsed_seconds": round(candle_elapsed_seconds, 3),
@@ -2512,7 +2657,7 @@ class ScreenerEngine:
         if not volume_validation_ready:
             data["volume_pending"] = True
             result["passed"] = True
-            result["reason"] = f"{option_type} premium chart setup: close > open and close > VWAP; volume check pending until 170s"
+            result["reason"] = f"{option_type} premium chart setup: close > open and close > VWAP; volume check pending until 90s"
             return result
 
         if avg_volume is None:
@@ -2542,7 +2687,11 @@ class ScreenerEngine:
         *,
         now_market: datetime | None = None,
     ) -> dict[str, Any]:
-        result = {"passed": False, "reason": "", "data": {"indicator": "3m_volume_breakout", "timeframe": "3m"}}
+        result = {
+            "passed": False,
+            "reason": "",
+            "data": {"indicator": "3m_volume_breakout", "timeframe": "3m", "target_index_setup": True},
+        }
         if state is None:
             result["reason"] = "3m state unavailable"
             return result
@@ -2565,7 +2714,9 @@ class ScreenerEngine:
             "avg_volume_period": 20,
             "volume_multiplier": 1.5,
             "required_volume": None if avg_volume is None else float(avg_volume) * 1.5,
-            "validation_window": "final_10_seconds",
+            "validation_window": "after_90_seconds",
+            "source": "option_premium_3m_indicator_state",
+            "target_index_setup": True,
         }
         result["data"] = data
 
@@ -2596,13 +2747,13 @@ class ScreenerEngine:
                 candle_elapsed_seconds = elapsed_seconds % 180.0
                 timing_source = "market_clock"
             seconds_until_close = max(0.0, 180.0 - candle_elapsed_seconds)
-            validation_ready = 170.0 <= candle_elapsed_seconds <= 180.0
+            validation_ready = S9_VOLUME_VALIDATION_START_SECONDS <= candle_elapsed_seconds <= 180.0
             data.update(
                 {
                     "candle_elapsed_seconds": round(candle_elapsed_seconds, 3),
                     "seconds_until_close": round(seconds_until_close, 3),
                     "validation_ready": validation_ready,
-                    "validation_window_start_seconds": 170.0,
+                    "validation_window_start_seconds": S9_VOLUME_VALIDATION_START_SECONDS,
                     "validation_window_end_seconds": 180.0,
                     "timing_source": timing_source,
                 }
@@ -2610,7 +2761,7 @@ class ScreenerEngine:
             if not validation_ready:
                 data["pending"] = True
                 result["reason"] = (
-                    "3m volume validation pending until 2:50-3:00 of the running candle"
+                    "3m volume validation pending until 1:30-3:00 of the running candle"
                 )
                 return result
 
@@ -2629,19 +2780,17 @@ class ScreenerEngine:
             result["reason"] = f"Live 3m volume {volume:.0f} < 1.5x 20-period average volume ({required_volume:.0f})"
             return result
 
-        if direction == "bullish":
-            if close <= open_price:
-                result["reason"] = f"CE candle not bullish: close {close:.2f} <= open {open_price:.2f}"
-                return result
-            result["passed"] = True
-            result["reason"] = f"CE 3m volume breakout: green candle and volume {volume:.0f} >= {required_volume:.0f}"
-            return result
-
-        if close >= open_price:
-            result["reason"] = f"PE candle not bearish: close {close:.2f} >= open {open_price:.2f}"
+        option_type = "CE" if direction == "bullish" else "PE"
+        if close <= open_price:
+            result["reason"] = (
+                f"{option_type} premium candle not bullish: close {close:.2f} <= open {open_price:.2f}"
+            )
             return result
         result["passed"] = True
-        result["reason"] = f"PE 3m volume breakout: red candle and volume {volume:.0f} >= {required_volume:.0f}"
+        result["reason"] = (
+            f"{option_type} premium 3m volume breakout: green candle and "
+            f"volume {volume:.0f} >= {required_volume:.0f}"
+        )
         return result
 
     def _check_stock_ema9_trend(
@@ -2920,6 +3069,30 @@ class ScreenerEngine:
         passed = close > ema20_value if direction == "bullish" else close < ema20_value
         comparator = ">" if direction == "bullish" else "<"
         return {"passed": passed, "reason": f"Completed 15m spot close {close:.4f} {comparator} EMA20 {ema20_value:.4f}" if passed else "Completed 15m spot EMA20 direction mismatch", "data": data}
+
+    def _check_target_pcr(
+        self,
+        option_chain: OptionChainSnapshot,
+        direction: str,
+    ) -> dict[str, Any]:
+        """NIFTY/SENSEX OI PCR filter; independent of PCR-shift history."""
+        pcr = self._calculate_pcr(option_chain)
+        lower, upper = (0.75, 1.40) if direction == "bullish" else (0.60, 1.25)
+        data = {
+            "pcr": pcr,
+            "source": "option_chain_open_interest",
+            "minimum": lower,
+            "maximum": upper,
+            "target_index_setup": True,
+        }
+        if pcr is None:
+            return {"passed": False, "reason": "PCR unavailable: CE or PE open interest missing/zero", "data": data}
+        passed = lower <= pcr <= upper
+        return {
+            "passed": passed,
+            "reason": f"PCR {pcr:.3f} {'within' if passed else 'outside'} range [{lower:.2f}, {upper:.2f}]",
+            "data": data,
+        }
 
     @staticmethod
     def _target_microstructure_refresh_required(evaluation: dict[str, Any]) -> bool:

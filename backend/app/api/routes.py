@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 from threading import Lock
 from typing import Any
@@ -16,11 +17,13 @@ from ..models import AutoTrade
 from ..services.auto_trade_service import AutoTradeService
 from ..services.dhan_config_service import DhanConfigService
 from ..services.refresh_service import RefreshService
+from ..services.s9_ltp_stream_service import S9LTPStreamService
 from ..services.s9_override_service import S9OverrideService
 
 router = APIRouter()
 settings = get_settings()
 refresh_service = RefreshService(settings)
+s9_ltp_stream_service = S9LTPStreamService(settings, refresh_service)
 _symbol_refresh_services: dict[str, RefreshService] = {
     normalize_market_symbol(settings.underlying_symbol): refresh_service,
 }
@@ -583,6 +586,45 @@ async def ws_screener(websocket: WebSocket) -> None:
         return
     except Exception:  # noqa: BLE001
         return
+
+
+@router.websocket("/ws/v1/s9/ltp")
+async def ws_s9_ltp(websocket: WebSocket) -> None:
+    """Forward only real Groww LTP ticks for the current S9 Top Opportunities."""
+    await websocket.accept()
+    loop = asyncio.get_running_loop()
+    updates: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
+    stream = s9_ltp_stream_service
+
+    def publish(update: dict[str, Any]) -> None:
+        def enqueue() -> None:
+            if updates.full():
+                try:
+                    updates.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            updates.put_nowait(update)
+
+        loop.call_soon_threadsafe(enqueue)
+
+    try:
+        subscription_count = await asyncio.to_thread(stream.start, publish)
+        await websocket.send_json({
+            "type": "s9_ltp_ready",
+            "subscription_count": subscription_count,
+            "source": "groww_feed",
+        })
+        while True:
+            await websocket.send_json(await updates.get())
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:  # noqa: BLE001
+        try:
+            await websocket.send_json({"type": "s9_ltp_error", "error": str(exc)})
+        except Exception:  # noqa: BLE001
+            pass
+    finally:
+        stream.remove_listener(publish)
 
 
 @router.get("/alerts")

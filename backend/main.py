@@ -30,7 +30,9 @@ scheduler = RefreshScheduler(
     refresh_service=refresh_service,
     interval_seconds=settings.refresh_interval_seconds,
 )
-open_trade_monitor = OpenTradeMonitor(settings, interval_seconds=10.0)
+# WebSocket ticks drive price management continuously; this short cycle only
+# discovers newly opened contracts and reconciles pending broker orders.
+open_trade_monitor = OpenTradeMonitor(settings, interval_seconds=2.0)
 
 
 @asynccontextmanager
@@ -83,6 +85,5 @@ app.include_router(router)
 
 # Backward-compatible legacy prefix.
 app.include_router(router, prefix="/api", include_in_schema=False)
-
 
 

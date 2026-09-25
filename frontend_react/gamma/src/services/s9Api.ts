@@ -7,7 +7,7 @@ const s9AdminHeaders = () => {
 
 export const getS9 = async ({ signal }: { signal?: AbortSignal } = {}) => {
   const res = await api.get("/screener/s9", {
-    params: { limit: 6, ltp_refresh: true },
+    params: { limit: 6 },
     signal,
     timeout: 12000,
   });

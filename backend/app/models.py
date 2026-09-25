@@ -25,6 +25,7 @@ class RefreshRun(Base):
     screener_results: Mapped[list["ScreenerResult"]] = relationship(back_populates="run")
     s9_filter_results: Mapped[list["S9FilterResult"]] = relationship(back_populates="run")
     s9_best_strike_results: Mapped[list["S9BestStrikeResult"]] = relationship(back_populates="run")
+    s9_ml_snapshots: Mapped[list["S9MLSnapshot"]] = relationship(back_populates="run")
     alerts: Mapped[list["AlertEvent"]] = relationship(back_populates="run")
 
 class S9TopOpportunitySnapshot(Base):
@@ -35,6 +36,100 @@ class S9TopOpportunitySnapshot(Base):
     cache_version: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=ist_now_naive)
+
+
+class S9MLSnapshot(Base):
+    """Append-only, analytics-only snapshot of one evaluated S9 contract."""
+
+    __tablename__ = "s9_ml_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "interval_start",
+            "symbol",
+            "expiry_date",
+            "strike",
+            "option_type",
+            name="uq_s9_ml_interval_instrument",
+        ),
+        Index("ix_s9_ml_symbol_interval", "symbol", "interval_start"),
+        Index("ix_s9_ml_expiry_strike", "expiry_date", "strike", "option_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("refresh_runs.id"), nullable=True, index=True)
+    scan_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    interval_start: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    security_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    option_symbol: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    expiry_date: Mapped[date] = mapped_column(Date, nullable=False)
+    strike: Mapped[float] = mapped_column(Float, nullable=False)
+    option_type: Mapped[str] = mapped_column(String(4), nullable=False)
+
+    underlying_ltp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_ltp: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candle_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    open_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    close_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_volume_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+    volume_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    option_candle_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    option_open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_low: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_close: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_volume: Mapped[float | None] = mapped_column(Float, nullable=True)
+    option_avg_volume_20: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    pcr: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pcr_shift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stoch_rsi_k: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stoch_rsi_d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    supertrend: Mapped[float | None] = mapped_column(Float, nullable=True)
+    supertrend_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    ema9: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vwap: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    gamma: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vega: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
+    oi_change: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_qty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    order_book_imbalance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    premium_rsi: Mapped[float | None] = mapped_column(Float, nullable=True)
+    premium_supertrend: Mapped[float | None] = mapped_column(Float, nullable=True)
+    premium_supertrend_direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    sweep_ema9_pass: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    sweep_ema9_value: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    raw_max_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    passed_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_filters: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    direction: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    signal: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+    filters: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    filter_passes: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    macro_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    raw_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=ist_now_naive)
+
+    run: Mapped[RefreshRun | None] = relationship(back_populates="s9_ml_snapshots")
 
 
 class DhanConfig(Base):
@@ -431,9 +526,9 @@ __all__ = [
     "ScreenerResult",
     "S9FilterResult",
     "S9BestStrikeResult",
+    "S9MLSnapshot",
     "S9OverrideState",
     "S9OverrideAudit",
     "AlertEvent",
     "AutoTrade",
 ]
-

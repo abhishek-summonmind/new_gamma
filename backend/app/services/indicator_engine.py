@@ -104,7 +104,7 @@ class IndicatorEngine:
                 )
                 bucket[symbol] = state
 
-                if timeframe in {"15m", "60m"}:
+                if timeframe in {"15m", "30m"}:
                     completed_state = self._completed_s9_trend_state(
                         symbol=symbol,
                         timeframe=timeframe,
@@ -134,7 +134,7 @@ class IndicatorEngine:
                 )
 
             result.states_by_timeframe[timeframe] = bucket
-            if timeframe in {"15m", "60m"}:
+            if timeframe in {"15m", "30m"}:
                 result.states_by_timeframe[f"s9_{timeframe}_completed"] = completed_trend_bucket
             if timeframe == primary_timeframe:
                 result.states_by_symbol = bucket

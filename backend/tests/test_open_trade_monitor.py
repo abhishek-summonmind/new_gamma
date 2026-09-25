@@ -25,6 +25,7 @@ from app.models import AutoTrade  # noqa: E402
 from app.services.open_trade_monitor import (  # noqa: E402
     FreshContractQuote,
     GrowwContractQuoteProvider,
+    GrowwOpenTradeLTPStream,
     OpenContractIdentity,
     OpenTradeMonitor,
 )
@@ -44,6 +45,42 @@ class FakeQuoteProvider:
     def fetch(self, contract: OpenContractIdentity) -> FreshContractQuote:
         self.contracts.append(contract)
         return self.quotes[contract.trading_symbol]
+
+
+class FakeLiveStream:
+    def __init__(self, quotes: dict[str, FreshContractQuote]):
+        self.quotes = quotes
+        self.contracts: list[OpenContractIdentity] = []
+        self.closed = False
+
+    def sync(self, contracts, callback) -> int:
+        self.contracts = list(contracts)
+        for contract in contracts:
+            quote = self.quotes.get(contract.trading_symbol)
+            if quote is not None:
+                callback(contract, quote)
+        return len(contracts)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeGrowwFeed:
+    def __init__(self, _api) -> None:
+        self.callback = None
+        self.instruments = []
+        self.unsubscribed = []
+        self.snapshot = {}
+
+    def subscribe_ltp(self, instruments, *, on_data_received) -> None:
+        self.instruments.extend(instruments)
+        self.callback = on_data_received
+
+    def unsubscribe_ltp(self, instruments) -> None:
+        self.unsubscribed.extend(instruments)
+
+    def get_ltp(self) -> dict:
+        return self.snapshot
 
 
 class FakeBroker:
@@ -374,6 +411,95 @@ class TestOpenTradeMonitor(unittest.TestCase):
             "/live-data/quote",
             params={"exchange": "BSE", "segment": "FNO", "trading_symbol": "SENSEX26SEP74700CE"},
         )
+
+    def test_live_stream_tick_drives_trailing_exit_without_rest_poll(self) -> None:
+        trade_id = self.add_trade(
+            symbol="SENSEX",
+            option_symbol="SENSEX26SEP74700CE",
+            average_entry_price=100.0,
+            hard_stop_price=90.0,
+        )
+        stream = FakeLiveStream({"SENSEX26SEP74700CE": self.fresh(115.0)})
+        provider = Mock()
+        monitor = self.monitor(provider, live_stream=stream)
+
+        monitor._run_live_cycle()  # noqa: SLF001
+        stream.quotes["SENSEX26SEP74700CE"] = self.fresh(112.0)
+        monitor._run_live_cycle()  # noqa: SLF001
+        trade = self.get_trade(trade_id)
+
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.exit_reason, "TRAILING_MAX_HIGH_MINUS_3")
+        provider.fetch.assert_not_called()
+
+    def test_exit_pending_live_order_is_reconciled_after_subscription_is_removed(self) -> None:
+        trade_id = self.add_trade(
+            symbol="TCS",
+            option_symbol="TCS26SEP2100CE",
+            dry_run=False,
+        )
+        with self.Session() as db:
+            trade = db.get(AutoTrade, trade_id)
+            trade.status = "EXIT_PENDING"
+            trade.management_state = "EXIT_PENDING"
+            trade.exit_order_id = "EXIT1"
+            trade.exit_order_status = "OPEN"
+            trade.exit_requested_quantity = 1
+            trade.exit_reason = "TRAILING_MAX_HIGH_MINUS_3"
+            db.commit()
+        broker = FakeBroker()
+        broker.orders_by_id["EXIT1"] = BrokerOrder("EXIT1", "FILLED", 1, 1, 125.0)
+        service = AutoTradeService(self.settings, broker=broker)
+        monitor = self.monitor(Mock(), live_stream=FakeLiveStream({}), trade_service=service)
+
+        monitor._run_live_cycle()  # noqa: SLF001
+        trade = self.get_trade(trade_id)
+
+        self.assertEqual(trade.status, "CLOSED")
+        self.assertEqual(trade.open_quantity, 0)
+        self.assertEqual(trade.exit_price, 125.0)
+
+    def test_groww_live_stream_subscribes_exact_open_contract_and_emits_tick(self) -> None:
+        feed_holder = {}
+
+        def feed_factory(api):
+            feed_holder["feed"] = FakeGrowwFeed(api)
+            return feed_holder["feed"]
+
+        service = Mock()
+        service.get_groww_access_token.return_value = "token"
+        stream = GrowwOpenTradeLTPStream(
+            self.settings,
+            service=service,
+            api_factory=lambda token: {"token": token},
+            feed_factory=feed_factory,
+        )
+        contract = OpenContractIdentity(
+            trade_id=7,
+            security_id="98765",
+            trading_symbol="SENSEX26SEP74700CE",
+            strike=74700.0,
+            expiry=date(2026, 9, 24),
+            option_type="CE",
+            underlying="SENSEX",
+            exchange="BSE",
+            segment="FNO",
+            hard_stop_price=200.0,
+        )
+        updates = []
+
+        self.assertEqual(stream.sync([contract], lambda identity, quote: updates.append((identity, quote))), 1)
+        feed = feed_holder["feed"]
+        feed.snapshot = {
+            "BSE": {"FNO": {"98765": {"ltp": 223.65, "tsInMillis": int(NOW.timestamp() * 1000)}}}
+        }
+        feed.callback({"exchange": "BSE", "segment": "FNO", "feed_key": "98765"})
+
+        self.assertEqual(feed.instruments, [{"exchange": "BSE", "segment": "FNO", "exchange_token": "98765"}])
+        self.assertEqual(updates[0][0], contract)
+        self.assertEqual(updates[0][1].ltp, 223.65)
+        stream.close()
+        self.assertEqual(feed.unsubscribed, feed.instruments)
 
 
 class TestOpenTradeMonitorSchedule(unittest.IsolatedAsyncioTestCase):

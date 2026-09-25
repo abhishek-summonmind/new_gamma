@@ -48,23 +48,23 @@ class TestS9CompletedTrendCandles(unittest.TestCase):
             completed_only=True,
         )
 
-    def test_60m_uses_previous_session_at_0920(self) -> None:
-        candles = self._completed("60m", 9, 20)
+    def test_30m_uses_previous_session_at_0920(self) -> None:
+        candles = self._completed("30m", 9, 20)
         self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-21 15:15", tz="Asia/Kolkata"))
 
-    def test_60m_uses_previous_session_at_0934(self) -> None:
-        candles = self._completed("60m", 9, 34)
+    def test_30m_uses_completed_session_candle_at_0934(self) -> None:
+        candles = self._completed("30m", 9, 34)
         self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-21 15:15", tz="Asia/Kolkata"))
 
-    def test_60m_does_not_use_running_candle_at_1014(self) -> None:
-        candles = self._completed("60m", 10, 14)
-        self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-21 15:15", tz="Asia/Kolkata"))
-        self.assertNotIn(pd.Timestamp("2026-09-22 10:15", tz="Asia/Kolkata"), candles.index)
+    def test_30m_does_not_use_running_candle_at_1014(self) -> None:
+        candles = self._completed("30m", 10, 14)
+        self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-22 09:45", tz="Asia/Kolkata"))
+        self.assertNotIn(pd.Timestamp("2026-09-22 10:30", tz="Asia/Kolkata"), candles.index)
 
-    def test_60m_uses_first_session_candle_after_completion(self) -> None:
-        candles = self._completed("60m", 10, 15)
-        self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-22 10:15", tz="Asia/Kolkata"))
-        self.assertEqual(candles.iloc[-1]["close"], self._frame().loc["2026-09-22 10:14"]["close"])
+    def test_30m_uses_first_session_candle_after_completion(self) -> None:
+        candles = self._completed("30m", 9, 45)
+        self.assertEqual(candles.index[-1], pd.Timestamp("2026-09-22 09:45", tz="Asia/Kolkata"))
+        self.assertEqual(candles.iloc[-1]["close"], self._frame().loc["2026-09-22 09:44"]["close"])
 
     def test_15m_uses_only_latest_completed_candle(self) -> None:
         self.assertEqual(
@@ -83,9 +83,9 @@ class TestS9CompletedTrendCandles(unittest.TestCase):
             return SimpleNamespace(latest=SimpleNamespace(candle_time=candle_time, close=close, ema9=ema9))
 
         states = {
-            "60m": {"NIFTY 50": state(101.0, 100.0)},
+            "30m": {"NIFTY 50": state(101.0, 100.0)},
             "15m": {"NIFTY 50": state(101.0, 100.0)},
-            "s9_60m_completed": {"NIFTY 50": state(99.0, 100.0)},
+            "s9_30m_completed": {"NIFTY 50": state(99.0, 100.0)},
             "s9_15m_completed": {"NIFTY 50": state(99.0, 100.0)},
         }
 

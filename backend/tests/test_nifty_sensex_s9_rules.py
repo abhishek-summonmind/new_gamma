@@ -14,7 +14,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 from app.config import Settings  # noqa: E402
 from app.services.option_types import OptionChainSnapshot, OptionContract  # noqa: E402
 from app.services.dhan_service import DhanService  # noqa: E402
-from app.services.screener_engine import ScreenerEngine  # noqa: E402
+from app.services.screener_engine import S9_TARGET_INDEX_FILTER_WEIGHTS, ScreenerEngine  # noqa: E402
 
 
 def contract(
@@ -22,6 +22,7 @@ def contract(
     *,
     strike=25000,
     ltp=102.5,
+    oi=1000,
     volume=100,
     delta=0.60,
     theta=-0.05,
@@ -37,7 +38,7 @@ def contract(
         strike=strike,
         option_type=option_type,
         ltp=ltp,
-        oi=1000,
+        oi=oi,
         oi_change=1,
         volume=volume,
         delta=delta,
@@ -75,6 +76,49 @@ def completed_state(close, ema20):
     )
 
 
+def target_3m_state(now: datetime):
+    previous = SimpleNamespace(
+        candle_time=now - timedelta(minutes=3),
+        open=99.0,
+        high=100.0,
+        low=98.0,
+        close=99.0,
+        volume=100.0,
+        supertrend=100.0,
+        supertrend_direction="down",
+    )
+    latest = SimpleNamespace(
+        candle_time=now - timedelta(seconds=175),
+        open=98.0,
+        high=102.0,
+        low=97.0,
+        close=99.0,
+        volume=150.0,
+        volume_ma20=100.0,
+        stoch_rsi_k=60.0,
+        stoch_rsi_d=40.0,
+        supertrend=98.0,
+        supertrend_direction="up",
+    )
+    return SimpleNamespace(timeframe="3m", latest=latest, previous=previous)
+
+
+def target_option_3m_state(now: datetime):
+    latest = SimpleNamespace(
+        candle_time=now - timedelta(seconds=175),
+        open=100.0,
+        high=103.0,
+        low=99.0,
+        close=102.5,
+        volume=150.0,
+        volume_ma=100.0,
+        volume_ma20=100.0,
+        vwap=100.0,
+        rsi=55.0,
+    )
+    return SimpleNamespace(timeframe="3m", latest=latest, previous=None)
+
+
 class TestNiftySensexS9Rules(unittest.TestCase):
     def setUp(self):
         self.settings = Settings(
@@ -87,6 +131,28 @@ class TestNiftySensexS9Rules(unittest.TestCase):
 
     def tearDown(self):
         self.engine._cache._GLOBAL_MEMORY_CACHE.clear()
+
+    def test_target_filter_weights_total_100(self):
+        self.assertEqual(
+            S9_TARGET_INDEX_FILTER_WEIGHTS,
+            {
+                "sweep": 10,
+                "macro_trend": 10,
+                "vwap": 10,
+                "order_book": 20,
+                "pcr": 5,
+                "pcr_shift": 5,
+                "delta": 10,
+                "theta": 5,
+                "stoch_rsi": 5,
+                "supertrend": 5,
+                "volume_breakout": 5,
+                "vega_vix": 5,
+                "gamma": 5,
+                "spread": 0,
+            },
+        )
+        self.assertEqual(sum(S9_TARGET_INDEX_FILTER_WEIGHTS.values()), 100)
 
     def test_completed_15m_close_above_ema20_scans_ce_only(self):
         sides = []
@@ -162,18 +228,24 @@ class TestNiftySensexS9Rules(unittest.TestCase):
         self.assertTrue(pe_check["passed"])
         self.assertFalse(self.engine._check_target_order_book(contract("PE", delta=-0.60, bid_qty=41, ask_qty=59), "bearish", option_symbol="NIFTY 50 25000 PE", now_market=start + timedelta(seconds=6))["passed"])
 
-    def test_volume_pcr_shift_thresholds(self):
-        now = datetime(2026, 9, 23, 10, 3)
-        key = self.engine._s9_volume_pcr_history_key("NIFTY 50")
-        self.engine._cache.set_json(key, [{"time": datetime(2026, 9, 23, 10, 0).isoformat(), "volume_pcr": 1.0}])
-        ce_chain = chain(contract("CE", volume=100), contract("PE", delta=-0.60, volume=104), now=now)
-        self.assertTrue(self.engine._check_target_volume_pcr_shift(ce_chain, "bullish", now_market=now)["passed"])
-        ce_fail = chain(contract("CE", volume=10000), contract("PE", delta=-0.60, volume=10399), now=now)
-        self.assertFalse(self.engine._check_target_volume_pcr_shift(ce_fail, "bullish", now_market=now)["passed"])
-        pe_chain = chain(contract("CE", volume=100), contract("PE", delta=-0.60, volume=96), now=now)
-        self.assertTrue(self.engine._check_target_volume_pcr_shift(pe_chain, "bearish", now_market=now)["passed"])
-        pe_fail = chain(contract("CE", volume=10000), contract("PE", delta=-0.60, volume=9601), now=now)
-        self.assertFalse(self.engine._check_target_volume_pcr_shift(pe_fail, "bearish", now_market=now)["passed"])
+    def test_target_pcr_ranges_and_weight(self):
+        ce_pass = chain(contract("CE", oi=1000), contract("PE", delta=-0.60, oi=750))
+        ce_fail = chain(contract("CE", oi=1000), contract("PE", delta=-0.60, oi=749))
+        pe_pass = chain(contract("CE", oi=1000), contract("PE", delta=-0.60, oi=600))
+        pe_fail = chain(contract("CE", oi=1000), contract("PE", delta=-0.60, oi=599))
+
+        self.assertTrue(self.engine._check_target_pcr(ce_pass, "bullish")["passed"])
+        self.assertFalse(self.engine._check_target_pcr(ce_fail, "bullish")["passed"])
+        self.assertTrue(self.engine._check_target_pcr(pe_pass, "bearish")["passed"])
+        self.assertFalse(self.engine._check_target_pcr(pe_fail, "bearish")["passed"])
+
+        status = self.engine._s9_filter_status(
+            "pcr",
+            self.engine._check_target_pcr(ce_pass, "bullish"),
+            "bullish",
+        )
+        self.assertEqual(status["weight"], 5)
+        self.assertEqual(status["name"], "PCR")
 
     def test_spread_strict_boundary(self):
         self.assertTrue(self.engine._check_target_spread(contract(bid_price=100, ask_price=100.0499))["passed"])
@@ -213,14 +285,14 @@ class TestNiftySensexS9Rules(unittest.TestCase):
         self.assertIn(25000, [row.strike for row in selected])
 
     def test_all_target_filters_confirm_buy_call_without_one_minute_state(self):
-        now = datetime(2026, 9, 23, 10, 3, 5)
+        now = datetime(2026, 9, 23, 10, 2, 55)
         ce = contract("CE")
         pe = contract("PE", delta=-0.60, volume=104, bid_qty=44, ask_qty=56)
+        self.engine._cache.set_json("vwap:NIFTY 50 25000 CE:5m", {"vwap": 100.0})
         self.engine._cache.set_json(
             self.engine._s9_volume_pcr_history_key("NIFTY 50"),
-            [{"time": datetime(2026, 9, 23, 10, 0, 5).isoformat(), "volume_pcr": 1.0}],
+            [{"time": (now - timedelta(minutes=3)).isoformat(), "volume_pcr": 1.0}],
         )
-        self.engine._cache.set_json("vwap:NIFTY 50 25000 CE:5m", {"vwap": 100.0})
         for offset in range(5):
             self.engine._check_target_order_book(
                 ce,
@@ -229,18 +301,31 @@ class TestNiftySensexS9Rules(unittest.TestCase):
                 now_market=now - timedelta(seconds=5 - offset),
             )
         rows = self.engine._run_s9(
-            states_by_timeframe={"s9_15m_completed": {"NIFTY 50": completed_state(101, 100)}},
+            states_by_timeframe={
+                "3m": {"NIFTY 50": target_3m_state(now)},
+                "s9_15m_completed": {"NIFTY 50": completed_state(101, 100)},
+            },
             s1_signals=[],
             option_chain=chain(ce, pe, now=now),
             now_market=now,
+            option_states={(25000.0, "CE"): target_option_3m_state(now)},
             macro_context={"india_vix": {"value": 17.5}},
         )
         self.assertEqual(rows[0].signal, "BUY_CALL")
         self.assertTrue(rows[0].payload["execution_allowed"])
         self.assertEqual(
             set(rows[0].payload["filters"]),
-            {"macro_trend", "pcr_shift", "delta", "theta", "vega_vix", "gamma", "spread", "vwap", "order_book"},
+            {"sweep", "pcr", "delta", "gamma", "vwap", "order_book", "stoch_rsi", "supertrend", "volume_breakout"},
         )
+        self.assertEqual(rows[0].payload["score"], 100)
+        self.assertEqual(rows[0].payload["filters"]["order_book"]["weight"], 20)
+        self.assertEqual(rows[0].payload["filters"]["pcr"]["weight"], 5)
+        for hidden in ("macro_trend", "theta", "vega_vix", "spread", "pcr_shift"):
+            self.assertNotIn(hidden, rows[0].payload["filters"])
+            self.assertNotIn(hidden, rows[0].payload["market_filters"])
+            self.assertNotIn(hidden, rows[0].payload["contract_filters"])
+            self.assertNotIn(hidden, rows[0].payload["selected_contract_evaluation"]["filters"])
+            self.assertNotIn(hidden, rows[0].payload["scanned_strikes"][0]["filters"])
 
     def test_missing_required_live_fields_fail_closed(self):
         missing = contract(theta=None, vega=None, gamma=None, bid_price=None, ask_price=None, bid_qty=None, ask_qty=None)

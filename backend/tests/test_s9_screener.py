@@ -235,7 +235,7 @@ class TestS9Screener(unittest.TestCase):
         return {
             "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
-            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
+            "30m": {"BANK NIFTY": _state("30m", prev, curr)},
         }
 
     def _neutral_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
@@ -244,7 +244,7 @@ class TestS9Screener(unittest.TestCase):
         return {
             "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
-            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
+            "30m": {"BANK NIFTY": _state("30m", prev, curr)},
         }
 
     def _bearish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
@@ -253,7 +253,7 @@ class TestS9Screener(unittest.TestCase):
         return {
             "3m": {"BANK NIFTY": _state("3m", prev, curr)},
             "15m": {"BANK NIFTY": _state("15m", prev, curr)},
-            "60m": {"BANK NIFTY": _state("60m", prev, curr)},
+            "30m": {"BANK NIFTY": _state("30m", prev, curr)},
         }
 
     def _weak_bullish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
@@ -264,7 +264,7 @@ class TestS9Screener(unittest.TestCase):
         return {
             "3m": {"BANK NIFTY": _state("3m", bullish_prev, bullish_curr)},
             "15m": {"BANK NIFTY": _state("15m", neutral_prev, neutral_curr)},
-            "60m": {"BANK NIFTY": _state("60m", neutral_prev, neutral_curr)},
+            "30m": {"BANK NIFTY": _state("30m", neutral_prev, neutral_curr)},
         }
 
     def _weak_bearish_index_states(self) -> dict[str, dict[str, SymbolIndicatorState]]:
@@ -275,10 +275,10 @@ class TestS9Screener(unittest.TestCase):
         return {
             "3m": {"BANK NIFTY": _state("3m", bearish_prev, bearish_curr)},
             "15m": {"BANK NIFTY": _state("15m", neutral_prev, neutral_curr)},
-            "60m": {"BANK NIFTY": _state("60m", neutral_prev, neutral_curr)},
+            "30m": {"BANK NIFTY": _state("30m", neutral_prev, neutral_curr)},
         }
 
-    def _mixed_index_states(self, *, hour: str, fifteen: str) -> dict[str, dict[str, SymbolIndicatorState]]:
+    def _mixed_index_states(self, *, thirty: str, fifteen: str) -> dict[str, dict[str, SymbolIndicatorState]]:
         points = {
             "bullish": (
                 _point(close=99, mcginley=100, rsi=54, macd=0, macd_signal=0),
@@ -294,12 +294,12 @@ class TestS9Screener(unittest.TestCase):
             ),
         }
         three_prev, three_curr = points["bullish"]
-        hour_prev, hour_curr = points[hour]
+        thirty_prev, thirty_curr = points[thirty]
         fifteen_prev, fifteen_curr = points[fifteen]
         return {
             "3m": {"BANK NIFTY": _state("3m", three_prev, three_curr)},
             "15m": {"BANK NIFTY": _state("15m", fifteen_prev, fifteen_curr)},
-            "60m": {"BANK NIFTY": _state("60m", hour_prev, hour_curr)},
+            "30m": {"BANK NIFTY": _state("30m", thirty_prev, thirty_curr)},
         }
 
     def _conflicting_s1_signals(self) -> list[ScreenerSignal]:
@@ -854,12 +854,12 @@ class TestS9Screener(unittest.TestCase):
         self.assertTrue(scanned)
         self.assertTrue(all(symbol.endswith(" PE") for symbol in scanned))
 
-    def test_s9_1h_bullish_15m_bullish_scans_ce_only(self) -> None:
+    def test_s9_30m_bullish_15m_bullish_scans_ce_only(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
 
         rows = self.engine._run_s9(
-            states_by_timeframe=self._mixed_index_states(hour="bullish", fifteen="bullish"),
+            states_by_timeframe=self._mixed_index_states(thirty="bullish", fifteen="bullish"),
             s1_signals=[],
             option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
             now_market=datetime(2026, 5, 1, 9, 30, 0),
@@ -912,12 +912,12 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["effective_direction"], "both")
         self.assertNotEqual(rows[0].payload["rejection_reason"], "SENSEX_NEUTRAL")
 
-    def test_s9_1h_bearish_15m_bearish_scans_pe_only(self) -> None:
+    def test_s9_30m_bearish_15m_bearish_scans_pe_only(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
 
         rows = self.engine._run_s9(
-            states_by_timeframe=self._mixed_index_states(hour="bearish", fifteen="bearish"),
+            states_by_timeframe=self._mixed_index_states(thirty="bearish", fifteen="bearish"),
             s1_signals=[],
             option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
             now_market=datetime(2026, 5, 1, 9, 30, 0),
@@ -926,12 +926,12 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["effective_direction"], "bearish")
         self.assertEqual(scanned_sides, ["PE"])
 
-    def test_s9_1h_bullish_15m_bearish_does_not_scan(self) -> None:
+    def test_s9_30m_bullish_15m_bearish_does_not_scan(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
 
         rows = self.engine._run_s9(
-            states_by_timeframe=self._mixed_index_states(hour="bullish", fifteen="bearish"),
+            states_by_timeframe=self._mixed_index_states(thirty="bullish", fifteen="bearish"),
             s1_signals=[],
             option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
             now_market=datetime(2026, 5, 1, 9, 30, 0),
@@ -941,12 +941,12 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["effective_direction"], "neutral")
         self.assertEqual(scanned_sides, [])
 
-    def test_s9_1h_bearish_15m_bullish_does_not_scan(self) -> None:
+    def test_s9_30m_bearish_15m_bullish_does_not_scan(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
 
         rows = self.engine._run_s9(
-            states_by_timeframe=self._mixed_index_states(hour="bearish", fifteen="bullish"),
+            states_by_timeframe=self._mixed_index_states(thirty="bearish", fifteen="bullish"),
             s1_signals=[],
             option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
             now_market=datetime(2026, 5, 1, 9, 30, 0),
@@ -956,12 +956,12 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["effective_direction"], "neutral")
         self.assertEqual(scanned_sides, [])
 
-    def test_s9_1h_or_15m_neutral_does_not_scan(self) -> None:
+    def test_s9_30m_or_15m_neutral_does_not_scan(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
 
         rows = self.engine._run_s9(
-            states_by_timeframe=self._mixed_index_states(hour="neutral", fifteen="bullish"),
+            states_by_timeframe=self._mixed_index_states(thirty="neutral", fifteen="bullish"),
             s1_signals=[],
             option_chain=_option_chain_many((_contract(56000, "CE"), _contract(56000, "PE")), atm=56000),
             now_market=datetime(2026, 5, 1, 9, 30, 0),
@@ -971,11 +971,11 @@ class TestS9Screener(unittest.TestCase):
         self.assertEqual(rows[0].payload["effective_direction"], "neutral")
         self.assertEqual(scanned_sides, [])
 
-    def test_s9_missing_1h_or_15m_does_not_scan(self) -> None:
+    def test_s9_missing_30m_or_15m_does_not_scan(self) -> None:
         scanned_sides: list[str] = []
         self.engine._eligible_s9_contracts = lambda _chain, option_type, _mode: scanned_sides.append(option_type) or ()
         states = self._bullish_index_states()
-        states.pop("60m")
+        states.pop("30m")
 
         rows = self.engine._run_s9(
             states_by_timeframe=states,

@@ -3,6 +3,7 @@ import { useMemo } from 'react'
 import { Loader2, Trophy } from 'lucide-react'
 
 import { useS9 } from '../../../../../features/hooks/useS9'
+import { s9LiveLtpKey, useS9LiveLtp } from '../../../../../features/hooks/useS9LiveLtp'
 import DryRunTradesTable from './DryRunTradesTable'
 
 const optionTypeLabel = (value: any) => {
@@ -37,20 +38,15 @@ const formatStrike = (value: any, optionType: any) => {
 }
 
 const filterColumns = [
-  { key: 'sweep', targetKey: 'macro_trend', label: 'SWEEP / EMA9 / 15M EMA20' },
-  { key: 'stoch_rsi', targetKey: 'vwap', label: 'STOCH RSI / VWAP CAP' },
-  { key: 'supertrend', targetKey: 'spread', label: 'SUPER TREND / SPREAD' },
-  { key: 'delta', targetKey: 'delta', label: 'DELTA' },
-  { key: 'pcr', targetKey: 'pcr_shift', label: 'PCR / PCR SHIFT' },
-  { key: 'vwap', targetKey: 'theta', label: 'VWAP / THETA' },
-  { key: 'order_book', targetKey: 'order_book', label: 'ORDER BOOK' },
-  { key: 'volume_breakout', targetKey: 'vega_vix', label: '3/5 VOL / VEGA-VIX' },
+  { key: 'sweep', label: 'SWEEP / EMA9' },
+  { key: 'stoch_rsi', label: 'STOCH RSI' },
+  { key: 'supertrend', label: 'SUPER TREND' },
+  { key: 'delta', label: 'DELTA' },
+  { key: 'pcr', label: 'PCR' },
+  { key: 'vwap', label: 'VWAP' },
+  { key: 'order_book', label: 'ORDER BOOK' },
+  { key: 'volume_breakout', label: '3/5 VOL' },
 ]
-
-const isTargetIndex = (payload: any) => {
-  const symbol = String(payload?.underlying_symbol || '').toUpperCase()
-  return symbol === 'NIFTY 50' || symbol === 'SENSEX'
-}
 
 const backendFilter = (payload: any, key: string) => {
   const stored = payload?.stored_filter_row || null
@@ -97,11 +93,6 @@ const filterTooltip = (payload: any, key: string) => {
   const actual = filter.actual_value ?? filter.data
   const required = filter.required_range || filter.rule || 'backend rule unavailable'
   return `Actual: ${formatTooltipValue(actual)} | Required: ${required}`
-}
-
-const filterKeyForRow = (payload: any, filter: typeof filterColumns[number]) => {
-  if (isTargetIndex(payload)) return filter.targetKey
-  return filter.key
 }
 
 const formatScore = (payload: any, item: any) => {
@@ -197,6 +188,7 @@ const TradeStatus = ({ value }: { value: string }) => {
 
 function S9Screen() {
   const { data, error, isLoading, isFetching, refetch } = useS9()
+  const liveLtps = useS9LiveLtp(data?.cache_version)
   const opportunities = useMemo(() => {
     const items = Array.isArray(data?.items) ? data.items : []
     const selected: any[] = []
@@ -303,11 +295,17 @@ function S9Screen() {
                 payload.strike ?? payload.evaluated_strike
               const passed = payload.passed_count ?? 0
               const total = payload.total_filters ?? 0
-              const ltp = getSelectedStrikeLtp(payload, strike, optionType)
+              const expiry = payload?.strike_scan?.expiry || payload?.expiry
+              const liveLtp = liveLtps[s9LiveLtpKey(
+                payload.underlying_symbol || item.symbol,
+                expiry,
+                strike,
+                optionType,
+              )]?.ltp
+              const ltp = liveLtp ?? getSelectedStrikeLtp(payload, strike, optionType)
               const gtp = payload?.gtp ?? item?.gtp
               const gtpPassed = payload?.gtp_pass_count ?? payload?.gtp_passed_count ?? passed
               const gtpTotal = payload?.gtp_total_filters ?? total
-              const expiry = payload?.strike_scan?.expiry || payload?.expiry
               const rsi = formatRsi(payload)
               const levels = premiumLevels(payload)
               const move = formatMove(ltp, gtp)
@@ -346,10 +344,9 @@ function S9Screen() {
                   <td className="px-px py-2 font-bold text-[#B42318]">{displayValue(levels.resistance, 2)}</td>
                   <td className="px-px py-2 font-bold">{displayValue(passed)}/{displayValue(total)}</td>
                   {filterColumns.map((filter) => {
-                    const filterKey = filterKeyForRow(payload, filter)
                     return (
-                      <td key={filter.key} className="px-px py-2" title={filterTooltip(payload, filterKey)}>
-                        <FilterBadge status={filterStatus(payload, filterKey)} />
+                      <td key={filter.key} className="px-px py-2" title={filterTooltip(payload, filter.key)}>
+                        <FilterBadge status={filterStatus(payload, filter.key)} />
                       </td>
                     )
                   })}

@@ -31,6 +31,7 @@ from .option_metric_service import OptionDeltaCacheProducer
 from .option_types import OptionChainSnapshot
 from .screener_engine import ScreenerEngine, ScreenerSignal
 from .s9_override_service import S9OverrideService
+from .s9_ml_snapshot_service import S9MLSnapshotService
 
 logger = logging.getLogger(__name__)
 import time as timer
@@ -50,6 +51,7 @@ class RefreshService:
         self._s9_override = S9OverrideService()
         self._alert_engine = AlertEngine(self._settings)
         self._auto_trade = AutoTradeService(self._settings)
+        self._s9_ml_snapshots = S9MLSnapshotService(self._settings)
 
         self._run_lock = Lock()
         self._dedupe_lock = Lock()
@@ -210,6 +212,25 @@ class RefreshService:
                             "dry_run": bool(self._settings.auto_entry_dry_run),
                             "error": str(auto_trade_exc),
                         }
+
+                    # Analytics-only append after S9 and trading decisions are complete.
+                    # A storage/schema problem is isolated by a savepoint and can never
+                    # change the signal or auto-entry result for this refresh.
+                    try:
+                        with db.begin_nested():
+                            ml_rows = self._s9_ml_snapshots.persist(
+                                db=db,
+                                run_id=run.id,
+                                signals=screener_result.get("S9", []),
+                                option_chain=ingestion_result.option_chain,
+                                states_by_timeframe=indicator_result.states_by_timeframe,
+                                option_states=option_states,
+                                macro_context=macro_context,
+                                scan_time=now_market,
+                            )
+                        logger.info("S9_ML_SNAPSHOT stored_rows=%s run_id=%s", ml_rows, run.id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("S9 ML snapshot storage failed without affecting trading flow")
 
                     alerts = self._alert_engine.build_alerts(screener_result)
                     self._store_alert_rows(db=db, run_id=run.id, rows=alerts)
@@ -2503,5 +2524,4 @@ class RefreshService:
     def _parse_hhmm(value: str) -> time:
         hours, minutes = value.split(":")
         return time(hour=int(hours), minute=int(minutes))
-
 
