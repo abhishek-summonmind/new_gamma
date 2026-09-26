@@ -14,7 +14,12 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///./test.db")
 
 from app.config import Settings  # noqa: E402
 from app.services.option_types import OptionChainSnapshot, OptionContract  # noqa: E402
-from app.services.screener_engine import S9_FILTER_WEIGHTS, ScreenerEngine  # noqa: E402
+from app.services.screener_engine import (  # noqa: E402
+    S9_FILTER_WEIGHTS,
+    S9_INDEX_VOLUME_VALIDATION_START_SECONDS,
+    S9_VOLUME_VALIDATION_START_SECONDS,
+    ScreenerEngine,
+)
 
 
 def premium_state(*, option_symbol: str = "FINNIFTY 25000 CE") -> SimpleNamespace:
@@ -147,9 +152,24 @@ class TestS9IndexOptionPremiumFilters(unittest.TestCase):
         self.assertNotEqual(vwap["status"], "unavailable")
         self.assertEqual(volume["data"]["source"], "option_premium_3m_indicator_state")
         self.assertEqual(volume["data"]["volume"], 300.0)
+        self.assertEqual(S9_INDEX_VOLUME_VALIDATION_START_SECONDS, 60.0)
+        self.assertEqual(volume["data"]["volume_validation_start_seconds"], 60.0)
+        self.assertTrue(volume["data"]["volume_validation_ready"])
         self.assertEqual(volume["weight"], 12)
         self.assertTrue(volume["passed"])
         self.assertEqual(evaluation["index_breadth_score"], 3)
+
+    def test_individual_stock_volume_keeps_125_second_start(self) -> None:
+        check = self.engine._check_stock_3m_volume_breakout(
+            premium_state(option_symbol="RELIANCE 3000 CE"),
+            "bullish",
+            now_market=datetime(2026, 9, 25, 9, 16, 30),
+        )
+
+        self.assertEqual(S9_VOLUME_VALIDATION_START_SECONDS, 125.0)
+        self.assertEqual(check["data"]["volume_validation_start_seconds"], 125.0)
+        self.assertTrue(check["data"]["volume_pending"])
+        self.assertTrue(check["passed"])
 
     def test_nifty_sensex_volume_is_contract_filter_with_five_points(self) -> None:
         row = contract(option_type="PE")
@@ -166,11 +186,13 @@ class TestS9IndexOptionPremiumFilters(unittest.TestCase):
             apply_oi_change_filter=False,
             target_index_setup=True,
             option_state=state,
-            evaluation_time=datetime(2026, 9, 25, 9, 16, 30),
+            evaluation_time=datetime(2026, 9, 25, 9, 17, 5),
         )
 
         volume = evaluation["contract_filters"]["volume_breakout"]
         self.assertEqual(volume["data"]["source"], "option_premium_3m_indicator_state")
+        self.assertEqual(volume["data"]["validation_window_start_seconds"], 60.0)
+        self.assertTrue(volume["data"]["validation_ready"])
         self.assertEqual(volume["weight"], 5)
         self.assertTrue(volume["passed"])
         self.assertIn("PE premium", volume["reason"])

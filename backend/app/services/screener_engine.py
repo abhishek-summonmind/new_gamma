@@ -33,7 +33,8 @@ S9_FILTER_WEIGHTS = {
     "oi_change_pct": 0,
 }
 S9_TOTAL_SCORE = sum(S9_FILTER_WEIGHTS.values())
-S9_VOLUME_VALIDATION_START_SECONDS = 90.0
+S9_VOLUME_VALIDATION_START_SECONDS = 125.0
+S9_INDEX_VOLUME_VALIDATION_START_SECONDS = 60.0
 S9_INDEX_BREADTH_SYMBOLS = ("NIFTY 50", "SENSEX", "BANK NIFTY")
 S9_INDEX_BREADTH_MAX_SCORE = len(S9_INDEX_BREADTH_SYMBOLS)
 S9_TARGET_INDEX_FILTER_WEIGHTS = {
@@ -354,6 +355,11 @@ class ScreenerEngine:
             is_stock_setup or normalize_market_symbol(index_key) in {"BANK NIFTY", "FINNIFTY"}
         )
         apply_volume_breakout_filter = self._s9_applies_volume_breakout_filter(index_key)
+        volume_validation_start_seconds = (
+            S9_INDEX_VOLUME_VALIDATION_START_SECONDS
+            if normalize_market_symbol(index_key) in {"NIFTY 50", "SENSEX", "BANK NIFTY", "FINNIFTY"}
+            else S9_VOLUME_VALIDATION_START_SECONDS
+        )
         previous_option_map = previous_option_map or {}
         option_states = option_states or {}
         option_rsi_states = option_rsi_states or {}
@@ -405,7 +411,10 @@ class ScreenerEngine:
             filters_required.append(
                 "3m Option Premium Volume Breakout: Green Candle + Live Volume >= Avg Volume(20) * 1.5"
                 if is_nifty_sensex_setup
-                else "3m Premium Chart: Close > Open + Close > VWAP + after 90s Live Volume > Avg Volume * 2"
+                else (
+                    "3m Premium Chart: Close > Open + Close > VWAP + "
+                    f"after {volume_validation_start_seconds:g}s Live Volume > Avg Volume * 2"
+                )
             )
         if is_nifty_sensex_setup:
             effective_direction, effective_signal = self._resolve_s9_target_index_macro_direction(
@@ -1420,12 +1429,14 @@ class ScreenerEngine:
             ),
             "volume_breakout": (
                 (
-                    "After 90 seconds (1:30-3:00): selected CE/PE premium green 3m candle and "
+                    "After 60 seconds (1:00-3:00): selected CE/PE premium green 3m candle and "
                     "Live Volume >= 1.5x 20-period Avg Volume"
                 )
                 if data.get("indicator") == "3m_volume_breakout"
                 else (
-                    "CE/PE: Close > Open, Close > VWAP; after 90s Live 3m Volume > Avg Volume * 2"
+                    "CE/PE: Close > Open, Close > VWAP; after "
+                    f"{float(data.get('volume_validation_start_seconds') or S9_VOLUME_VALIDATION_START_SECONDS):g}s "
+                    "Live 3m Volume > Avg Volume * 2"
                 )
             ),
             "order_book": (
@@ -1680,6 +1691,11 @@ class ScreenerEngine:
                             option_state if uses_index_option_premium_state else volume_breakout_state,
                             direction,
                             now_market=evaluation_time,
+                            validation_start_seconds=(
+                                S9_INDEX_VOLUME_VALIDATION_START_SECONDS
+                                if uses_index_option_premium_state
+                                else S9_VOLUME_VALIDATION_START_SECONDS
+                            ),
                             source=(
                                 "option_premium_3m_indicator_state"
                                 if uses_index_option_premium_state
@@ -2581,6 +2597,7 @@ class ScreenerEngine:
         direction: str,
         *,
         now_market: datetime | None = None,
+        validation_start_seconds: float = S9_VOLUME_VALIDATION_START_SECONDS,
         source: str = "underlying_3m_indicator_state",
     ) -> dict[str, Any]:
         """Stock/BankNifty/FinNifty volume rule on 3m without threshold changes."""
@@ -2608,7 +2625,7 @@ class ScreenerEngine:
             "volume_multiplier": 2.0,
             "required_volume": None if avg_volume is None else float(avg_volume) * 2.0,
             "vwap": None if vwap is None else float(vwap),
-            "volume_validation_start_seconds": S9_VOLUME_VALIDATION_START_SECONDS,
+            "volume_validation_start_seconds": validation_start_seconds,
             "source": source,
         }
         result["data"] = data
@@ -2644,7 +2661,7 @@ class ScreenerEngine:
                 elapsed_seconds = max(0.0, (now_local - session_open).total_seconds())
                 candle_elapsed_seconds = elapsed_seconds % 180.0
                 timing_source = "market_clock"
-            volume_validation_ready = candle_elapsed_seconds >= S9_VOLUME_VALIDATION_START_SECONDS
+            volume_validation_ready = candle_elapsed_seconds >= validation_start_seconds
             data.update(
                 {
                     "candle_elapsed_seconds": round(candle_elapsed_seconds, 3),
@@ -2657,7 +2674,10 @@ class ScreenerEngine:
         if not volume_validation_ready:
             data["volume_pending"] = True
             result["passed"] = True
-            result["reason"] = f"{option_type} premium chart setup: close > open and close > VWAP; volume check pending until 90s"
+            result["reason"] = (
+                f"{option_type} premium chart setup: close > open and close > VWAP; "
+                f"volume check pending until {validation_start_seconds:g}s"
+            )
             return result
 
         if avg_volume is None:
@@ -2714,7 +2734,8 @@ class ScreenerEngine:
             "avg_volume_period": 20,
             "volume_multiplier": 1.5,
             "required_volume": None if avg_volume is None else float(avg_volume) * 1.5,
-            "validation_window": "after_90_seconds",
+            "validation_window": "after_60_seconds",
+            "volume_validation_start_seconds": S9_INDEX_VOLUME_VALIDATION_START_SECONDS,
             "source": "option_premium_3m_indicator_state",
             "target_index_setup": True,
         }
@@ -2747,13 +2768,17 @@ class ScreenerEngine:
                 candle_elapsed_seconds = elapsed_seconds % 180.0
                 timing_source = "market_clock"
             seconds_until_close = max(0.0, 180.0 - candle_elapsed_seconds)
-            validation_ready = S9_VOLUME_VALIDATION_START_SECONDS <= candle_elapsed_seconds <= 180.0
+            validation_ready = (
+                S9_INDEX_VOLUME_VALIDATION_START_SECONDS
+                <= candle_elapsed_seconds
+                <= 180.0
+            )
             data.update(
                 {
                     "candle_elapsed_seconds": round(candle_elapsed_seconds, 3),
                     "seconds_until_close": round(seconds_until_close, 3),
                     "validation_ready": validation_ready,
-                    "validation_window_start_seconds": S9_VOLUME_VALIDATION_START_SECONDS,
+                    "validation_window_start_seconds": S9_INDEX_VOLUME_VALIDATION_START_SECONDS,
                     "validation_window_end_seconds": 180.0,
                     "timing_source": timing_source,
                 }
@@ -2761,7 +2786,7 @@ class ScreenerEngine:
             if not validation_ready:
                 data["pending"] = True
                 result["reason"] = (
-                    "3m volume validation pending until 1:30-3:00 of the running candle"
+                    "3m volume validation pending until 1:00-3:00 of the running candle"
                 )
                 return result
 
