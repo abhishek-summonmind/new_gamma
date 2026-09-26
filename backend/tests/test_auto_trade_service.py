@@ -139,7 +139,9 @@ def signal(symbol: str, score: float, *, strike: float = 1500, option_type: str 
         payload={
             "underlying_symbol": symbol,
             "score": score,
-            "confirmed": False,
+            "confirmed": True,
+            "execution_allowed": True,
+            "entry_rule_version": "S9_ENTRY_V1",
             "signal": "buy_call" if is_call else "buy_put",
             "selected_strike": strike,
             "selected_option_type": option_type,
@@ -215,18 +217,18 @@ class TestAutoTradeService(unittest.TestCase):
             self.assertEqual(result["entries"], 0)
             self.assertEqual(result["entry_rejections"][0]["reason"], "SIGNAL_NOT_BUY_CALL_OR_BUY_PUT")
 
-    def test_red_vix_risk_gate_blocks_auto_entry(self):
-        rejected = signal("DIXON", 100)
-        rejected.payload["macro_effects"] = {"vix_risk_filter_active": True}
+    def test_legacy_macro_risk_payload_no_longer_controls_entry(self):
+        candidate = signal("DIXON", 100)
+        candidate.payload["macro_effects"] = {"vix_risk_filter_active": True}
         with self.Session() as db:
             result = self.service.process(
-                db=db, run_id=1, signals=[rejected], option_chain=chain("DIXON", 100),
+                db=db, run_id=1, signals=[candidate], option_chain=chain("DIXON", 100),
                 states_by_timeframe={"3m": {"DIXON": state("DIXON", self.start, close=105, low=104, high=106)}},
                 now_market=self.start,
             )
-            self.assertEqual(result["entries"], 0)
+            self.assertEqual(result["entries"], 1)
 
-    def test_index_score_gate_rejects_69_and_accepts_70(self):
+    def test_banknifty_score_gate_rejects_79_and_accepts_80(self):
         settings = self.settings.model_copy(
             update={"underlying_symbol": "BANK NIFTY", "nifty_index_symbol": "BANK NIFTY"}
         )
@@ -236,7 +238,7 @@ class TestAutoTradeService(unittest.TestCase):
             rejected = service.process(
                 db=db,
                 run_id=1,
-                signals=[signal("BANK NIFTY", 69)],
+                signals=[signal("BANK NIFTY", 79)],
                 option_chain=chain("BANK NIFTY", 100),
                 states_by_timeframe={"3m": {"BANK NIFTY": chart}},
                 now_market=self.start,
@@ -244,13 +246,41 @@ class TestAutoTradeService(unittest.TestCase):
             accepted = service.process(
                 db=db,
                 run_id=2,
-                signals=[signal("BANK NIFTY", 70)],
+                signals=[signal("BANK NIFTY", 80)],
                 option_chain=chain("BANK NIFTY", 100),
                 states_by_timeframe={"3m": {"BANK NIFTY": chart}},
                 now_market=self.start,
             )
             self.assertEqual(rejected["entries"], 0)
             self.assertEqual(accepted["entries"], 1)
+
+    def test_legacy_entry_payload_is_hard_blocked(self):
+        legacy = signal("DIXON", 100)
+        legacy.payload.pop("entry_rule_version")
+        with self.Session() as db:
+            result = self.service.process(
+                db=db,
+                run_id=1,
+                signals=[legacy],
+                option_chain=chain("DIXON", 100),
+                states_by_timeframe={"3m": {"DIXON": state("DIXON", self.start, close=105, low=104, high=106)}},
+                now_market=self.start,
+            )
+            self.assertEqual(result["entries"], 0)
+            self.assertEqual(result["entry_rejections"][0]["reason"], "LEGACY_ENTRY_LOGIC_DISABLED")
+
+    def test_nifty_and_sensex_legacy_auto_entry_scope_is_disabled(self):
+        for symbol_name in ("NIFTY 50", "SENSEX"):
+            settings = self.settings.model_copy(
+                update={"underlying_symbol": symbol_name, "nifty_index_symbol": symbol_name}
+            )
+            service = AutoTradeService(settings, broker=FakeBroker(lot_size=1))
+            candidate = signal(symbol_name, 100)
+            self.assertIsNone(service._entry_candidate(signals=[candidate], symbol=symbol_name))
+            self.assertEqual(
+                service._entry_candidate_rejection_reason(signals=[candidate], symbol=symbol_name),
+                "ENTRY_SCOPE_UNSUPPORTED",
+            )
 
     def test_add_lot_flow_is_disabled_but_opposite_ema_close_does_not_exit(self):
         with self.Session() as db:
@@ -371,7 +401,7 @@ class TestAutoTradeService(unittest.TestCase):
             result = service.process(
                 db=db,
                 run_id=1,
-                signals=[signal("BANK NIFTY", 70)],
+                signals=[signal("BANK NIFTY", 80)],
                 option_chain=chain("BANK NIFTY", 100),
                 states_by_timeframe={"3m": {"BANK NIFTY": chart}},
                 now_market=datetime(2026, 9, 17, 9, 15),

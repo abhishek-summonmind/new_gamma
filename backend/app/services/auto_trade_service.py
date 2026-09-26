@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 class AutoTradeService:
     INDEX_SYMBOLS = {"NIFTY 50", "SENSEX", "BANK NIFTY", "FINNIFTY"}
+    S9_ENTRY_INDEX_SYMBOLS = {"BANK NIFTY", "FINNIFTY"}
+    S9_ENTRY_RULE_VERSION = "S9_ENTRY_V1"
     ADD_LOT_FLOW_ENABLED = False
     BREAKEVEN_TRIGGER_PCT = 8.0
     TRAILING_TRIGGER_PCT = 15.0
@@ -374,10 +376,12 @@ class AutoTradeService:
             payload = signal.payload if isinstance(signal.payload, dict) else {}
             if normalize_market_symbol(payload.get("underlying_symbol") or signal.symbol) != symbol:
                 continue
-            macro = payload.get("macro_effects") if isinstance(payload.get("macro_effects"), dict) else {}
             if (
-                self._candidate_direction(signal) in {"BUY_CALL", "BUY_PUT"}
-                and not bool(macro.get("vix_risk_filter_active"))
+                self._is_s9_entry_symbol(symbol)
+                and str(payload.get("entry_rule_version") or "") == self.S9_ENTRY_RULE_VERSION
+                and bool(payload.get("confirmed"))
+                and bool(payload.get("execution_allowed"))
+                and self._candidate_direction(signal) in {"BUY_CALL", "BUY_PUT"}
                 and self._score(payload) >= threshold
             ):
                 eligible.append(signal)
@@ -399,15 +403,31 @@ class AutoTradeService:
         best_reason = "NO_ELIGIBLE_S9_SIGNAL"
         for signal in symbol_signals:
             payload = signal.payload if isinstance(signal.payload, dict) else {}
+            if not self._is_s9_entry_symbol(symbol):
+                return "ENTRY_SCOPE_UNSUPPORTED"
+            if str(payload.get("entry_rule_version") or "") != self.S9_ENTRY_RULE_VERSION:
+                return "LEGACY_ENTRY_LOGIC_DISABLED"
+            if not bool(payload.get("confirmed")) or not bool(payload.get("execution_allowed")):
+                return "S9_ENTRY_GATES_NOT_CONFIRMED"
             if self._candidate_direction(signal) not in {"BUY_CALL", "BUY_PUT"}:
                 best_reason = "SIGNAL_NOT_BUY_CALL_OR_BUY_PUT"
                 continue
-            macro = payload.get("macro_effects") if isinstance(payload.get("macro_effects"), dict) else {}
-            if bool(macro.get("vix_risk_filter_active")):
-                return "VIX_RISK_FILTER_ACTIVE"
             if self._score(payload) < threshold:
                 return f"SCORE_BELOW_MIN_{threshold:g}"
         return best_reason
+
+    @classmethod
+    def _is_s9_entry_symbol(cls, symbol: str) -> bool:
+        normalized = normalize_market_symbol(symbol)
+        return normalized in cls.S9_ENTRY_INDEX_SYMBOLS or normalized not in cls.INDEX_SYMBOLS
+
+    def _minimum_score(self, symbol: str) -> float:
+        normalized = normalize_market_symbol(symbol)
+        if normalized in self.S9_ENTRY_INDEX_SYMBOLS:
+            return max(80.0, float(self._settings.auto_entry_index_min_score))
+        if normalized in self.INDEX_SYMBOLS:
+            return float(self._settings.auto_entry_index_min_score)
+        return max(85.0, float(self._settings.auto_entry_stock_min_score))
 
     @staticmethod
     def _candidate_direction(signal: ScreenerSignal) -> str:
@@ -430,13 +450,6 @@ class AutoTradeService:
         if option_type == "PE":
             return "BUY_PUT"
         return ""
-
-    def _minimum_score(self, symbol: str) -> float:
-        return (
-            float(self._settings.auto_entry_index_min_score)
-            if normalize_market_symbol(symbol) in self.INDEX_SYMBOLS
-            else float(self._settings.auto_entry_stock_min_score)
-        )
 
     @staticmethod
     def _record_rejection(
@@ -592,8 +605,8 @@ class AutoTradeService:
             last_action_key=reference,
             details={
                 "quantity_unit": "contracts",
-                "entry_rule": "S9_SCORE_GATE",
-                "entry_reason": "SCORE_GATE_AND_VALID_DIRECTION",
+                "entry_rule": "S9_ENTRY_V1_SCORE_GATE",
+                "entry_reason": "S9_GATES_AND_SCORE_CONFIRMED",
                 "entry_reference_id": reference,
                 "resolved_instrument": {
                     "underlying": instrument.get("underlying") or symbol,

@@ -38,14 +38,15 @@ const formatStrike = (value: any, optionType: any) => {
 }
 
 const filterColumns = [
-  { key: 'sweep', label: 'SWEEP / EMA9' },
-  { key: 'stoch_rsi', label: 'STOCH RSI' },
-  { key: 'supertrend', label: 'SUPER TREND' },
-  { key: 'delta', label: 'DELTA' },
-  { key: 'pcr', label: 'PCR' },
-  { key: 'vwap', label: 'VWAP' },
-  { key: 'order_book', label: 'ORDER BOOK' },
-  { key: 'volume_breakout', label: '3/5 VOL' },
+  { key: 'scan_start', label: '09:25 START' },
+  { key: 'master_trend', label: '1H EMA 20/200' },
+  { key: 'entry_trigger', label: '15M TRIGGER' },
+  { key: 'daily_rsi', label: 'DAILY RSI' },
+  { key: 'vwap', label: 'PREMIUM VWAP' },
+  { key: 'order_book', label: 'BOOK 55-60%' },
+  { key: 'pcr_shift', label: '5M PCR SHIFT' },
+  { key: 'spread', label: 'SPREAD <0.10' },
+  { key: 'expiry_safety', label: 'EXPIRY 14D+' },
 ]
 
 const backendFilter = (payload: any, key: string) => {
@@ -99,7 +100,9 @@ const formatScore = (payload: any, item: any) => {
   const rawScore = Number(payload?.score ?? item?.confidence ?? 0)
   const maxScore = Number(payload?.max_score || 100)
   const score = rawScore <= 1 && maxScore === 100 ? rawScore * 100 : rawScore
-  return `${displayValue(score, 0)}/${displayValue(maxScore, 0)}`
+  const hurdle = Number(payload?.entry_hurdle_score)
+  const hurdleLabel = Number.isFinite(hurdle) ? ` ≥${hurdle.toFixed(0)}` : ''
+  return `${displayValue(score, 0)}/${displayValue(maxScore, 0)}${hurdleLabel}`
 }
 
 const formatMove = (ltp: any, gtp: any) => {
@@ -142,7 +145,7 @@ const formatRsi = (payload: any) => {
       ? '-'
       : displayValue(numeric, 2),
     timeframe: payload?.underlying_rsi_timeframe
-      ? String(payload.underlying_rsi_timeframe)
+      ? String(payload.underlying_rsi_timeframe).toUpperCase()
       : '',
   }
 }
@@ -195,28 +198,11 @@ function S9Screen() {
     const seen = new Set<string>()
     for (const item of items) {
       const symbol = String(item?.payload?.underlying_symbol || item?.symbol || '').toUpperCase()
+      if (symbol === 'NIFTY 50' || symbol === 'SENSEX') continue
       if (!symbol || seen.has(symbol)) continue
       selected.push(item)
       seen.add(symbol)
       if (selected.length === 6) break
-    }
-    for (const symbol of ['NIFTY 50', 'SENSEX']) {
-      if (seen.has(symbol)) continue
-      if (selected.length === 6) {
-        for (let index = selected.length - 1; index >= 0; index -= 1) {
-          const value = String(selected[index]?.payload?.underlying_symbol || selected[index]?.symbol || '').toUpperCase()
-          if (value !== 'NIFTY 50' && value !== 'SENSEX') {
-            selected.splice(index, 1)
-            break
-          }
-        }
-      }
-      selected.push({
-        symbol,
-        confidence: 0,
-        payload: { underlying_symbol: symbol, score: 0, passed_count: 0, total_filters: 0, data_pending: true },
-      })
-      seen.add(symbol)
     }
     return selected.slice(0, 6)
   }, [data])
@@ -228,10 +214,10 @@ function S9Screen() {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <Trophy className="h-5 w-5 shrink-0 text-[#175CD3]" />
-            <h1 className="text-lg font-bold text-gray-950">Top Opportunities</h1>
+            <h1 className="text-lg font-bold text-gray-950">Entry Opportunities</h1>
           </div>
           <p className="mt-1 text-xs font-medium text-gray-600">
-            Market-wide S9 ranking by filter pass score. Current screen selection is ignored.
+            Stocks, BANKNIFTY and FINNIFTY - S9 entry gates only. SL, exit and live LTP logic remain unchanged.
           </p>
         </div>
         <div className="shrink-0 rounded-full border border-gray-200 bg-gray-50 px-2.5 py-1 text-[10px] font-bold text-gray-700">

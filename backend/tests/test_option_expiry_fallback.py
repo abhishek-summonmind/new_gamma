@@ -78,7 +78,7 @@ class TestOptionExpiryFallback(unittest.TestCase):
 
         self.assertEqual(resolved, nearest)
 
-    def test_stock_expiry_uses_current_month_before_and_after_16th(self) -> None:
+    def test_stock_expiry_uses_next_month_when_current_has_under_14_days(self) -> None:
         expiries = {
             date(2026, 9, 24),
             date(2026, 10, 29),
@@ -101,10 +101,10 @@ class TestOptionExpiryFallback(unittest.TestCase):
                 today=date(2026, 9, 17),
             )
 
-        self.assertEqual(before_16th, date(2026, 9, 24))
-        self.assertEqual(after_16th, date(2026, 9, 24))
+        self.assertEqual(before_16th, date(2026, 10, 29))
+        self.assertEqual(after_16th, date(2026, 10, 29))
 
-    def test_stock_expiry_does_not_use_next_month_after_current_expiry(self) -> None:
+    def test_stock_expiry_uses_next_month_after_current_expiry(self) -> None:
         service = DhanService(
             settings=Settings(
                 database_url="sqlite:///./test.db",
@@ -112,18 +112,16 @@ class TestOptionExpiryFallback(unittest.TestCase):
                 use_mock_data=False,
             )
         )
-        with (
-            patch.object(
-                service,
-                "_get_groww_fno_expiries",
-                return_value={date(2026, 9, 24), date(2026, 10, 29)},
-            ),
-            self.assertRaisesRegex(RuntimeError, "current month 2026-09"),
+        with patch.object(
+            service,
+            "_get_groww_fno_expiries",
+            return_value={date(2026, 9, 24), date(2026, 10, 29)},
         ):
-            service.resolve_groww_stock_option_expiry(
+            resolved = service.resolve_groww_stock_option_expiry(
                 underlying="DIXON",
                 today=date(2026, 9, 25),
             )
+        self.assertEqual(resolved, date(2026, 10, 29))
 
     def test_stock_expiry_does_not_roll_december_to_january_after_16th(self) -> None:
         year, month = DhanService._stock_expiry_target_month(date(2026, 12, 17))

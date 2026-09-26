@@ -144,6 +144,8 @@ def make_signal(symbol="HAL", *, option_type="CE", strike=1500, score=85):
             "underlying_symbol": symbol,
             "score": score,
             "confirmed": True,
+            "execution_allowed": True,
+            "entry_rule_version": "S9_ENTRY_V1",
             "signal": "buy_call" if option_type == "CE" else "buy_put",
             "selected_strike": strike,
             "selected_option_type": option_type,
@@ -180,6 +182,7 @@ class TestGrowwAutoTradeReconciliation(unittest.TestCase):
         now = datetime(2026, 9, 14, 9, 15)
         signal = SimpleNamespace(symbol="DIXON", signal="BUY_CALL", payload={
             "underlying_symbol": "DIXON", "score": 85, "confirmed": True,
+            "execution_allowed": True, "entry_rule_version": "S9_ENTRY_V1",
             "selected_strike": 1500, "selected_option_type": "CE",
             "selected_option_symbol": "DIXON26SEP1500CE",
         })
@@ -214,7 +217,8 @@ class TestGrowwAutoTradeReconciliation(unittest.TestCase):
         service = AutoTradeService(settings, broker=broker)
         now = datetime(2026, 9, 14, 9, 15)
         signal = SimpleNamespace(symbol="DIXON", signal="BUY_CALL", payload={"underlying_symbol": "DIXON", "score": 85,
-            "confirmed": True, "selected_strike": 1500, "selected_option_type": "CE",
+            "confirmed": True, "execution_allowed": True, "entry_rule_version": "S9_ENTRY_V1",
+            "selected_strike": 1500, "selected_option_type": "CE",
             "selected_option_symbol": "DIXON26SEP1500CE"})
         chain = SimpleNamespace(expiry_date=date(2026, 9, 24), contracts=(
             SimpleNamespace(security_id="DIXON26SEP1500CE", strike=1500, option_type="CE", ltp=105),))

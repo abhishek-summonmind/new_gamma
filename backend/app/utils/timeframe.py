@@ -7,6 +7,8 @@ import pandas as pd
 
 
 def timeframe_to_minutes(timeframe: str) -> int:
+    if timeframe == "1d":
+        return 375
     if not timeframe.endswith("m"):
         raise ValueError(f"Unsupported timeframe format: {timeframe}")
     return int(timeframe[:-1])
@@ -50,6 +52,29 @@ def resample_ohlcv(
         return frame
 
     normalized = normalize_ohlcv_frame(frame, timezone_name)
+
+    if timeframe == "1d":
+        aggregated = (
+            normalized.resample("1D", closed="left", label="left")
+            .agg(
+                {
+                    "open": "first",
+                    "high": "max",
+                    "low": "min",
+                    "close": "last",
+                    "volume": "sum",
+                }
+            )
+            .dropna(subset=["open", "high", "low", "close"])
+        )
+        if completed_only and now_market is not None:
+            market_time = now_market
+            if market_time.tzinfo is None:
+                market_time = market_time.replace(tzinfo=ZoneInfo(timezone_name))
+            else:
+                market_time = market_time.astimezone(ZoneInfo(timezone_name))
+            aggregated = aggregated.loc[aggregated.index.date < market_time.date()]
+        return aggregated
 
     open_hours, open_minutes = _parse_hhmm(market_open_time)
     offset = pd.Timedelta(hours=open_hours, minutes=open_minutes)

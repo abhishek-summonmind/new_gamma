@@ -220,14 +220,14 @@ class Settings(BaseModel):
     frontend_no_cache: bool = False
     run_refresh_on_startup: bool = False
 
-    timeframes: Tuple[str, ...] = ("3m", "5m", "10m", "15m", "30m", "60m")
+    timeframes: Tuple[str, ...] = ("3m", "5m", "10m", "15m", "30m", "60m", "1d")
     active_screeners: Tuple[str, ...] = ("S9",)
     underlying_symbol: str = "NIFTY 50"
-    s9_scan_symbols: Tuple[str, ...] = ("NIFTY 50", "SENSEX", "BANK NIFTY", "FINNIFTY")
-    lookback_candles: int = 180
+    s9_scan_symbols: Tuple[str, ...] = ("BANK NIFTY", "FINNIFTY")
+    lookback_candles: int = 240
     refresh_interval_seconds: int = 60
     s9_top_refresh_interval_seconds: int = 180
-    intraday_fetch_days: int = 2
+    intraday_fetch_days: int = 60
     s9_strike_scan_count: int = 8
     s9_override_refresh_debounce_seconds: float = 2.0
     market_timezone: str = "Asia/Kolkata"
@@ -251,7 +251,7 @@ class Settings(BaseModel):
     auto_entry_enabled: bool = False
     auto_entry_dry_run: bool = True
     auto_entry_stock_min_score: float = 85.0
-    auto_entry_index_min_score: float = 70.0
+    auto_entry_index_min_score: float = 80.0
     auto_entry_lots: int = 1
     auto_entry_hard_stop_pct: float = 10.0
     auto_entry_add_trigger_pct: float = 10.0
@@ -335,7 +335,7 @@ class Settings(BaseModel):
         cleaned = tuple(dict.fromkeys(row.strip().lower() for row in value if row.strip()))
         if not cleaned:
             raise ValueError("At least one timeframe is required.")
-        invalid = [timeframe for timeframe in cleaned if not timeframe.endswith("m")]
+        invalid = [timeframe for timeframe in cleaned if not timeframe.endswith("m") and timeframe != "1d"]
         if invalid:
             raise ValueError(f"Unsupported timeframe(s): {', '.join(invalid)}")
         return cleaned
@@ -720,12 +720,12 @@ def get_settings() -> Settings:
         run_refresh_on_startup=str(os.getenv("RUN_REFRESH_ON_STARTUP", "false")).strip().lower()
         in {"1", "true", "yes", "on"},
         timeframes=tuple(
-            row.strip() for row in os.getenv("TIMEFRAMES", "3m,5m,10m,15m,30m,60m").replace(";", ",").split(",") if row.strip()
+            row.strip() for row in os.getenv("TIMEFRAMES", "3m,5m,10m,15m,30m,60m,1d").replace(";", ",").split(",") if row.strip()
         ),
-        lookback_candles=_int_env("LOOKBACK_CANDLES", 180),
+        lookback_candles=_int_env("LOOKBACK_CANDLES", 240),
         refresh_interval_seconds=_int_env("REFRESH_INTERVAL_SECONDS", _int_env("SCAN_INTERVAL_SECONDS", 10)),
         s9_top_refresh_interval_seconds=max(1, _int_env("S9_TOP_REFRESH_INTERVAL_SECONDS", 180)),
-        intraday_fetch_days=_int_env("INTRADAY_FETCH_DAYS", 2),
+        intraday_fetch_days=_int_env("INTRADAY_FETCH_DAYS", 60),
         s9_strike_scan_count=max(1, _int_env("S9_STRIKE_SCAN_COUNT", 8)),
         s9_override_refresh_debounce_seconds=max(
             0.0,
@@ -748,7 +748,7 @@ def get_settings() -> Settings:
         auto_entry_dry_run=str(os.getenv("AUTO_ENTRY_DRY_RUN", "true")).strip().lower()
         in {"1", "true", "yes", "on"},
         auto_entry_stock_min_score=min(100.0, max(0.0, _float_env("AUTO_ENTRY_STOCK_MIN_SCORE", 85.0))),
-        auto_entry_index_min_score=min(100.0, max(0.0, _float_env("AUTO_ENTRY_INDEX_MIN_SCORE", 70.0))),
+        auto_entry_index_min_score=min(100.0, max(0.0, _float_env("AUTO_ENTRY_INDEX_MIN_SCORE", 80.0))),
         auto_entry_lots=max(1, _int_env("AUTO_ENTRY_LOTS", 1)),
         auto_entry_hard_stop_pct=min(99.0, max(0.1, _float_env("AUTO_ENTRY_HARD_STOP_PCT", 10.0))),
         auto_entry_add_trigger_pct=max(0.1, _float_env("AUTO_ENTRY_ADD_TRIGGER_PCT", 10.0)),

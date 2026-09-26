@@ -1322,15 +1322,32 @@ class DhanService:
 
     def resolve_groww_stock_option_expiry(self, *, underlying: str, today: date | None = None) -> date:
         current_day = today or date.today()
-        year, month = self._stock_expiry_target_month(current_day)
         expiries = self._get_groww_fno_expiries(underlying)
-        return self._monthly_stock_expiry(
+        year, month = self._stock_expiry_target_month(current_day)
+        current_candidates = sorted(
+            row for row in expiries
+            if row >= current_day and row.year == year and row.month == month
+        )
+        current_expiry = current_candidates[-1] if current_candidates else None
+        if current_expiry is not None and (current_expiry - current_day).days >= 14:
+            return current_expiry
+
+        next_month_anchor = (current_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+        next_expiry = self._monthly_stock_expiry(
             underlying=underlying,
             available_expiries=expiries,
-            year=year,
-            month=month,
+            year=next_month_anchor.year,
+            month=next_month_anchor.month,
             today=current_day,
         )
+        logger.info(
+            "Expiry safety rerouted %s from %s (%s days left) to next-month expiry %s",
+            underlying,
+            current_expiry.isoformat() if current_expiry is not None else "unavailable",
+            (current_expiry - current_day).days if current_expiry is not None else 0,
+            next_expiry.isoformat(),
+        )
+        return next_expiry
 
     @staticmethod
     def _stock_expiry_target_month(today: date) -> tuple[int, int]:
