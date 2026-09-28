@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
@@ -19,6 +19,7 @@ from app.config import (  # noqa: E402
     validate_live_market_data_connection,
     validate_market_data_credentials,
 )
+from app.services.dhan_service import DhanService  # noqa: E402
 
 
 class TestGrowwCredentialLoading(unittest.TestCase):
@@ -189,6 +190,65 @@ class TestGrowwCredentialLoading(unittest.TestCase):
             return_value=settings,
         ), patch("app.services.dhan_client.DhanClient.get_option_chain", side_effect=error):
             validate_live_market_data_connection(settings)
+
+    def test_startup_validation_uses_first_s9_symbol(self):
+        settings = Settings(
+            database_url="sqlite:///./test.db",
+            market_data_mode="live",
+            underlying_symbol="NIFTY 50",
+            s9_scan_symbols=("BANK NIFTY", "FINNIFTY"),
+            groww_access_token="access-token",
+            dhan=DhanSettings(provider="groww"),
+        )
+        snapshot = Mock(
+            underlying="BANK NIFTY",
+            requested_expiry=None,
+            expiry_date=__import__("datetime").date(2026, 10, 27),
+            contracts=(),
+            fallback_used=False,
+        )
+
+        with patch(
+            "app.services.dhan_config_service.DhanConfigService.apply_runtime_market_data_config",
+            return_value=settings,
+        ), patch(
+            "app.services.dhan_client.DhanClient.get_option_chain",
+            return_value=snapshot,
+        ) as get_option_chain:
+            validate_live_market_data_connection(settings)
+
+        get_option_chain.assert_called_once_with("BANK NIFTY", depth=settings.dhan.option_chain_depth)
+
+    def test_rejected_direct_token_falls_back_to_generated_token_once(self):
+        settings = Settings(
+            database_url="sqlite:///./test.db",
+            market_data_mode="live",
+            groww_access_token="stale-token",
+            groww_api_key="api-key",
+            groww_api_secret="api-secret",
+            dhan=DhanSettings(provider="groww"),
+        )
+        forbidden = Mock(status_code=403, reason="Forbidden", text="forbidden")
+        forbidden.json.return_value = {
+            "status": "FAILURE",
+            "error": {"code": "GA000", "message": "Access Forbidden"},
+        }
+        success = Mock(status_code=200, reason="OK", text="ok")
+        success.json.return_value = {"status": "SUCCESS", "payload": {"strikes": {}}}
+        token = Mock(status_code=200, reason="OK", text="ok")
+        token.json.return_value = {"token": "fresh-token"}
+        service = DhanService(settings)
+        service._session = Mock()  # noqa: SLF001
+        service._session.get.side_effect = (forbidden, success)  # noqa: SLF001
+        service._session.post.return_value = token  # noqa: SLF001
+
+        result = service.get_json("/option-chain/test")
+
+        self.assertEqual(result["status"], "SUCCESS")
+        self.assertEqual(service._session.get.call_count, 2)  # noqa: SLF001
+        retry_headers = service._session.get.call_args_list[1].kwargs["headers"]  # noqa: SLF001
+        self.assertEqual(retry_headers["Authorization"], "Bearer fresh-token")
+        self.assertFalse(service._is_transient_groww_error("HTTP 403 GA000 Access Forbidden"))  # noqa: SLF001
 
 
 if __name__ == "__main__":

@@ -92,6 +92,7 @@ class DhanService:
         self._base_url = self._dhan.base_url.rstrip("/")
         self._session = self._build_session()
         self._groww_generated_access_token = ""
+        self._groww_prefer_generated_access_token = False
         # Last-good provider responses are deliberately keyed by the complete
         # contract identity.  This prevents a transient failure from ever
         # borrowing data from another symbol, exchange, expiry, or timeframe.
@@ -635,6 +636,20 @@ class DhanService:
         allow_validated_missing_underlying: bool = False,
     ) -> bool:
         normalized = str(message or "").lower()
+        if any(
+            marker in normalized
+            for marker in (
+                "http 401",
+                "http 403",
+                "access forbidden",
+                "required roles",
+                "invalid token",
+                "token invalid",
+                "authentication failed",
+                "unauthorized",
+            )
+        ):
+            return False
         # The option-chain API can briefly return HTTP 404 + GA000 for an
         # underlying that the instrument master has already validated.  Do
         # not apply this exception to unvalidated identities or other APIs.
@@ -998,6 +1013,28 @@ class DhanService:
         except requests.RequestException as exc:
             raise RuntimeError(f"Groww request failed for {endpoint}: {exc}") from exc
 
+        if response.status_code in {401, 403} and self._can_generate_groww_access_token():
+            logger.warning(
+                "Groww rejected the configured access token; generating a fresh token from API key/secret and retrying once. "
+                "endpoint=%s status_code=%s",
+                endpoint,
+                response.status_code,
+            )
+            self._groww_generated_access_token = ""
+            self._groww_prefer_generated_access_token = True
+            headers["Authorization"] = f"Bearer {self._effective_access_token().strip()}"
+            try:
+                response = self._session.get(
+                    url,
+                    params=request_params,
+                    headers=headers,
+                    timeout=float(self._dhan.timeout_seconds),
+                )
+            except requests.Timeout as exc:
+                raise RuntimeError(f"Groww request timed out for {endpoint} after token refresh") from exc
+            except requests.RequestException as exc:
+                raise RuntimeError(f"Groww request failed for {endpoint} after token refresh: {exc}") from exc
+
         try:
             data = response.json()
         except ValueError:
@@ -1168,6 +1205,10 @@ class DhanService:
 
     def _effective_access_token(self) -> str:
         if self._provider == "groww":
+            if self._groww_prefer_generated_access_token:
+                if self._groww_generated_access_token:
+                    return self._groww_generated_access_token
+                return self._generate_groww_access_token()
             direct_token = str(self._groww.groww_access_token or "").strip()
             if direct_token:
                 return direct_token
@@ -1179,6 +1220,12 @@ class DhanService:
             database_token
             or self._dhan.access_token
             or ""
+        )
+
+    def _can_generate_groww_access_token(self) -> bool:
+        return bool(
+            str(self._groww.groww_api_key or "").strip()
+            and str(self._groww.groww_api_secret or "").strip()
         )
 
     def get_groww_access_token(self) -> str:

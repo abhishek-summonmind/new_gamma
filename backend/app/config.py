@@ -491,8 +491,12 @@ def validate_live_market_data_connection(settings: Settings) -> None:
     if settings.market_data_mode != "live" or settings.dhan.provider != "groww":
         return
     from .services.dhan_client import DhanClient
+    validation_symbol = next(
+        (str(symbol).strip() for symbol in settings.s9_scan_symbols if str(symbol).strip()),
+        settings.underlying_symbol,
+    )
     try:
-        snapshot = DhanClient(settings).get_option_chain(settings.underlying_symbol, depth=settings.dhan.option_chain_depth)
+        snapshot = DhanClient(settings).get_option_chain(validation_symbol, depth=settings.dhan.option_chain_depth)
     except Exception as exc:
         message = str(exc)
         normalized = message.lower()
@@ -532,7 +536,7 @@ def validate_live_market_data_connection(settings: Settings) -> None:
             logger.warning(
                 "Groww startup connectivity check deferred; API will start and the refresh scheduler will retry. "
                 "symbol=%s error=%s",
-                settings.underlying_symbol,
+                validation_symbol,
                 message,
             )
             return
